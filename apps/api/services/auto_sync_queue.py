@@ -100,7 +100,7 @@ def mark_synced(conn, job_ids: Sequence[str]) -> None:
         return
     with conn.cursor() as cur:
         # Never alongside the dashboard cache warmer's read (core/monitored_jobs_lock).
-        monitored_jobs_lock.lock_for_write(cur, restore_lock_timeout_ms=2000)
+        monitored_jobs_lock.lock_for_write(cur)
         cur.execute(
             "UPDATE monitored_jobs SET last_auto_sync_at = NOW() WHERE job_id = ANY(%s)",
             (list(job_ids),),

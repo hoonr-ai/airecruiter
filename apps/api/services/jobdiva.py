@@ -338,6 +338,17 @@ class _SharedJDClient:
         kwargs.setdefault("timeout", self._timeout)
         return _shared_jd_client().stream(method, url, **kwargs)
 
+    def __getattr__(self, name: str) -> Any:
+        # Deliberately no pass-through: client state (headers, cookies, event
+        # hooks) is shared by every caller on the worker, so changing it from
+        # one call would leak into all the others. Per-call options go on the
+        # request (headers=..., params=...). A call site needing more should
+        # construct with other arguments, which gets its own client.
+        raise AttributeError(
+            f"{name!r} is not available on the shared JobDiva client "
+            f"(services.jobdiva._SharedJDClient): pass per-request options instead"
+        )
+
 
 def _jd_async_client(*args: Any, **kwargs: Any) -> Any:
     """``httpx.AsyncClient`` for this module. Timeout-only construction (every

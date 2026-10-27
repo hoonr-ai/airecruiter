@@ -25,6 +25,8 @@ apps/api/monitored_jobs.json
 scripts/*.log
 *.sql
 *.sql.gz
+# ...except the hand-written ops queries (deployment/postgres-tuning.sh).
+!deployment/sql/*.sql
 
 # Local probe / POC artifacts kept off-repo.
 apps/api/tmp/

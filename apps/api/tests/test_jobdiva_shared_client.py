@@ -187,3 +187,54 @@ def test_cached_candidate_read_is_dropped_by_a_write(monkeypatch):
         return first, again, after
 
     assert asyncio.run(main()) == ({"name": "old"}, {"name": "old"}, {"name": "new"})
+
+
+_SUPPORTED = {"get", "post", "put", "patch", "delete", "head", "request", "stream", "paces_itself"}
+
+
+def test_every_call_site_only_uses_what_the_shared_client_supports():
+    """Static scan of services/jobdiva.py: a client from
+    ``httpx.AsyncClient(timeout=...)`` (or a ``client`` parameter it is passed
+    as) must only use the methods _SharedJDClient forwards."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(jobdiva.__file__).read_text())
+
+    def is_shared_ctor(node):
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "AsyncClient"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "httpx"
+            and not node.args
+            and all(k.arg == "timeout" for k in node.keywords)
+        )
+
+    bad = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        names = {a.arg for a in fn.args.args + fn.args.kwonlyargs if a.arg == "client"}
+        for node in ast.walk(fn):
+            if isinstance(node, ast.AsyncWith):
+                for item in node.items:
+                    if is_shared_ctor(item.context_expr) and isinstance(item.optional_vars, ast.Name):
+                        names.add(item.optional_vars.id)
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in names
+                and node.attr not in _SUPPORTED
+            ):
+                bad.append(f"{fn.name}:{node.lineno} {node.value.id}.{node.attr}")
+    assert not bad, bad
+
+
+def test_unsupported_attribute_says_why():
+    import pytest
+
+    with pytest.raises(AttributeError, match="shared JobDiva client"):
+        jobdiva.httpx.AsyncClient(timeout=5.0).headers

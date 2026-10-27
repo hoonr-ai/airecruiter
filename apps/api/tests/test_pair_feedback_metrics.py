@@ -279,7 +279,10 @@ class _RecordingCursor:
         self.statements.append(sql)
         if sql.startswith("SET LOCAL"):
             return
-        if sql.startswith("SELECT pg_advisory_xact_lock"):
+        if sql.startswith("SELECT pg_advisory_xact_lock") or sql.startswith("SELECT set_config"):
+            return
+        if sql.startswith("SELECT current_setting('lock_timeout')"):
+            self._result = ("2000ms",)
             return
         if sql.startswith("SELECT job_id"):
             self._result = self._job_row

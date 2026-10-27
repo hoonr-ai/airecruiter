@@ -425,6 +425,8 @@ async def lifespan(app: FastAPI):
                 # The cache keeps its last payload; the next cycle is 25s away.
                 logger.debug(f"monitored_jobs_cache_warmer skipped a cycle: {e}")
                 record_custom_metric("Custom/Scheduler/monitored_jobs_cache_warmer/skipped", {"count": 1})
+                # Skips the archived pass too, on purpose: whatever blocked the
+                # first read (an auto-sync write) blocks the second the same way.
                 return
             except Exception as e:  # noqa: BLE001
                 # Escalated from warning → error with traceback. A failing

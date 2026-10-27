@@ -89,6 +89,10 @@ class AsyncTTLCache:
         if pending is not None and pending[0] is loop:
             return copy.deepcopy(await asyncio.shield(pending[1]))
         task = loop.create_task(loader())
+        # If every caller waiting on it is cancelled, nobody awaits the task:
+        # retrieve its outcome so a failure isn't logged as "Task exception
+        # was never retrieved".
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
         self._loading[flight] = (loop, task)
         try:
             value = await asyncio.shield(task)

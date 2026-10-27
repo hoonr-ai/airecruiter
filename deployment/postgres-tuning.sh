@@ -14,11 +14,13 @@
 # restarts — it prints the command for a quiet window.
 #
 # Before turning on the idle timeout, run deployment/sql/check-idle-in-transaction.sql
-# against the database: any session it lists would be ended by the new limit.
+# against the database at busy hours: any session it lists would be ended by
+# the new limit. APPLY=1 refuses to run until you confirm that with
+# IDLE_CHECK_DONE=1 (or skip the timeout with SKIP_IDLE_TIMEOUT=1).
 #
 # Usage (Azure CLI, `az login`, rights on the server):
-#   RESOURCE_GROUP=<rg> ./deployment/postgres-tuning.sh            # show only
-#   RESOURCE_GROUP=<rg> APPLY=1 ./deployment/postgres-tuning.sh    # change
+#   RESOURCE_GROUP=<rg> ./deployment/postgres-tuning.sh                              # show only
+#   RESOURCE_GROUP=<rg> APPLY=1 IDLE_CHECK_DONE=1 ./deployment/postgres-tuning.sh    # change
 #
 # Optional: DB_NAME (default job-diva-db), DB_RESOURCE_GROUP.
 set -euo pipefail
@@ -27,6 +29,21 @@ RESOURCE_GROUP="${RESOURCE_GROUP:?set RESOURCE_GROUP (resource group of the prod
 DB_NAME="${DB_NAME:-job-diva-db}"
 DB_RESOURCE_GROUP="${DB_RESOURCE_GROUP:-$RESOURCE_GROUP}"
 APPLY="${APPLY:-0}"
+IDLE_CHECK_DONE="${IDLE_CHECK_DONE:-0}"
+SKIP_IDLE_TIMEOUT="${SKIP_IDLE_TIMEOUT:-0}"
+SQL_DIR="$(cd "$(dirname "$0")" && pwd)/sql"
+
+for f in check-idle-in-transaction.sql top-queries.sql; do
+  if [ ! -f "$SQL_DIR/$f" ]; then
+    echo "Missing $SQL_DIR/$f (needed before and after this change). Check out the full deployment/ folder." >&2
+    exit 1
+  fi
+done
+if [ "$APPLY" = 1 ] && [ "$SKIP_IDLE_TIMEOUT" != 1 ] && [ "$IDLE_CHECK_DONE" != 1 ]; then
+  echo "Refusing to set idle_in_transaction_session_timeout: run $SQL_DIR/check-idle-in-transaction.sql" >&2
+  echo "at busy hours first, then re-run with IDLE_CHECK_DONE=1 (or SKIP_IDLE_TIMEOUT=1 to leave it unset)." >&2
+  exit 1
+fi
 
 param() {
   az postgres flexible-server parameter show -g "$DB_RESOURCE_GROUP" -s "$DB_NAME" -n "$1" --query value -o tsv
@@ -60,7 +77,11 @@ with_item() {
 
 echo "==> $DB_NAME ($DB_RESOURCE_GROUP)"
 set_param log_lock_waits on
-set_param idle_in_transaction_session_timeout 60000  # ms
+if [ "$SKIP_IDLE_TIMEOUT" = 1 ]; then
+  echo "  idle_in_transaction_session_timeout: skipped (SKIP_IDLE_TIMEOUT=1)"
+else
+  set_param idle_in_transaction_session_timeout 60000  # ms
+fi
 
 # pg_stat_statements: allow-listed (azure.extensions), preloaded
 # (shared_preload_libraries, restart), and created in the app database.

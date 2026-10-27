@@ -281,15 +281,21 @@ def test_notifications_are_limited_per_browser_session_not_per_ip():
     sig = re.match(pattern, "Bearer aaa.bbb.c-c_c", re.I)
     assert sig and sig.group("notif_jwt_sig") == "c-c_c"
     assert re.match(pattern, "Basic dXNlcg==", re.I) is None
+    assert re.match(pattern, "Bearer opaque-token", re.I) is None  # -> per-IP key
+    assert re.match(pattern, "Bearer aaa.bbb", re.I) is None
     assert "default" in m.group(1) and "$binary_remote_addr" in m.group(1)
     assert re.search(r"limit_req_zone \$notifications_session_key zone=notifications_session_limit:\S+ rate=\d+r/m;", upstreams)
     assert re.search(r"limit_req_zone \$binary_remote_addr zone=notifications_ip_limit:\S+ rate=\d+r/m;", upstreams)
 
     conf = (repo / "nginx-app-locations.conf").read_text(encoding="utf-8")
-    loc = re.search(r"location /api/v1/notifications \{(.*?)\n    \}", conf, re.S)
-    assert loc, "notifications location is missing"
-    body = loc.group(1)
-    assert "zone=notifications_session_limit" in body and "zone=notifications_ip_limit" in body
-    assert "api_read_limit" not in body and "api_write_limit" not in body
-    assert "proxy_pass http://airecruiter_api;" in body
-    assert "proxy_read_timeout 86400;" in body  # the SSE stream stays open
+    # Exact list path + everything under it; never a bare prefix that would
+    # also catch /api/v1/notificationsX.
+    assert not re.search(r"location /api/v1/notifications\s*\{", conf)
+    for opener in (r"location = /api/v1/notifications \{", r"location \^~ /api/v1/notifications/ \{"):
+        loc = re.search(opener + r"(.*?)\n    \}", conf, re.S)
+        assert loc, f"notifications location missing: {opener}"
+        body = loc.group(1)
+        assert "zone=notifications_session_limit" in body and "zone=notifications_ip_limit" in body
+        assert "api_read_limit" not in body and "api_write_limit" not in body
+        assert "proxy_pass http://airecruiter_api;" in body
+        assert "proxy_read_timeout 86400;" in body  # the SSE stream stays open

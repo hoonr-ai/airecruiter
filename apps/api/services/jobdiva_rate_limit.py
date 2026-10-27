@@ -109,19 +109,28 @@ _paced_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar("jobdiva_paced
 # How long a request paced by paced_send waits for a slot before giving up
 # with SLOT_TIMEOUT_STATUS. Interactive reads have someone waiting; writes
 # (any non-GET) wait longer, since giving up on one loses the action, not
-# just a refresh.
+# just a refresh — but well inside the 60s gateway timeout of the shortest
+# nginx routes, leaving time for the JobDiva call itself.
 CLIENT_INTERACTIVE_MAX_WAIT_S = _env_float("JOBDIVA_INTERACTIVE_MAX_WAIT_S", 20.0)
-CLIENT_WRITE_MAX_WAIT_S = _env_float("JOBDIVA_WRITE_MAX_WAIT_S", 60.0)
+CLIENT_WRITE_MAX_WAIT_S = _env_float("JOBDIVA_WRITE_MAX_WAIT_S", 30.0)
 CLIENT_BACKGROUND_MAX_WAIT_S = _env_float("JOBDIVA_BACKGROUND_MAX_WAIT_S", 120.0)
 # paced_send's answer when no slot came up: a local 429 with Retry-After
 # (never sent to JobDiva) — "try again later", which is what it is, rather
-# than a 5xx that reads as a JobDiva outage. SLOT_TIMEOUT_HEADER tells it
-# apart from a real 429.
+# than a 5xx that reads as a JobDiva outage. SLOT_TIMEOUT_HEADER (see
+# is_slot_timeout) tells it apart from a real 429. It never starts the
+# shared cooldown, and no JobDiva caller treats a 429 as more than "retry
+# later": the ones that do start cooldowns go through bi_get, which this
+# never answers.
 SLOT_TIMEOUT_STATUS = 429
 SLOT_TIMEOUT_HEADER = "X-Pair-JobDiva-Slot-Timeout"
 # Token requests skip the budget: every other call depends on one, they're
 # rare (the token is cached) and a slot timeout there would fail everything.
 _UNPACED_PATH_PARTS = ("/authenticate",)
+
+
+def is_slot_timeout(response: Optional[httpx.Response]) -> bool:
+    """True for paced_send's local "no slot came up" answer (never sent)."""
+    return response is not None and response.headers.get(SLOT_TIMEOUT_HEADER) == "1"
 
 
 class SlotTimeout(Exception):
