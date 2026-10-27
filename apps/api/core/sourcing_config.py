@@ -530,6 +530,15 @@ EXA_SOURCING_CONTACT_FALLBACK = _os.getenv(
     "EXA_SOURCING_CONTACT_FALLBACK", "true"
 ).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
+# A launch session's S1 search asks Apollo but not the paid Exa contact run:
+# Launch PAIR's S3 looks up every selected row still missing a contact, so
+# the sourcing-time Exa run only held the search open (each Exa producer
+# waits on its lookups before it closes) and bought contacts for rows never
+# selected. Read by unified_candidate_search._paid_contact_deferred.
+SOURCING_DEFER_PAID_CONTACT_ENABLED = _os.getenv(
+    "SOURCING_DEFER_PAID_CONTACT_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
 try:
     EXA_SOURCING_CONTACT_CAP = int(
         _os.getenv("EXA_SOURCING_CONTACT_CAP", "25").strip() or "25"

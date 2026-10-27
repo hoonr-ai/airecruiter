@@ -32,10 +32,14 @@ class Effects:
 
         return CandidateSearchRequest(**(payload or {}))
 
-    def search_events(self, request: Any, *, schedule_cross_submissions: bool) -> AsyncIterator[Dict[str, Any]]:
+    def search_events(
+        self, request: Any, *, schedule_cross_submissions: bool, defer_paid_contact: bool = False,
+    ) -> AsyncIterator[Dict[str, Any]]:
         from routers import candidates
 
-        return candidates.iter_search_events(request, schedule_cross_submissions=schedule_cross_submissions)
+        return candidates.iter_search_events(
+            request, schedule_cross_submissions=schedule_cross_submissions, defer_paid_contact=defer_paid_contact,
+        )
 
     # ── contacts ────────────────────────────────────────────────────────────
     def enrich(self, items: Sequence[Dict[str, Any]], *, job_id: Any, concurrency: int) -> AsyncIterator[Dict[str, Any]]:

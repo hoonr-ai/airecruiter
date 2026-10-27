@@ -65,10 +65,56 @@ def test_exa_poll_budget_fits_a_phone_lookup():
 
 def test_contact_lookups_do_not_borrow_the_deep_search_slot(monkeypatch):
     monkeypatch.setattr(sourcing_config, "EXA_AGENT_CONCURRENCY", 1)
-    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_CONCURRENCY", 3)
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_WORKER_CONCURRENCY", 10)
     monkeypatch.setattr(ce, "_EXA_SEMAPHORE", None)
 
-    assert ce._exa_semaphore()._value == 3
+    assert ce._exa_semaphore()._value == 10
+
+
+def test_exa_slots_are_bounded_per_job_not_shared_across_jobs(monkeypatch):
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_CONCURRENCY", 2)
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_WORKER_CONCURRENCY", 10)
+    monkeypatch.setattr(ce, "_EXA_SEMAPHORE", None)
+    monkeypatch.setattr(ce, "_JOB_EXA_SEMAPHORES", {})
+    running = {"a": 0, "b": 0}
+    peak = {"a": 0, "b": 0}
+
+    async def lookup(job):
+        async with ce._exa_slot(job):
+            running[job] += 1
+            peak[job] = max(peak[job], running[job])
+            await asyncio.sleep(0.01)
+            running[job] -= 1
+
+    async def main():
+        await asyncio.gather(*(lookup(j) for j in ("a", "b") for _ in range(5)))
+
+    asyncio.run(main())
+    # Each job is held to its own bound, and job b ran alongside job a
+    # rather than queueing behind it.
+    assert peak == {"a": 2, "b": 2}
+    assert ce._JOB_EXA_SEMAPHORES == {}
+
+
+def test_exa_worker_bound_caps_all_jobs_together(monkeypatch):
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_CONCURRENCY", 5)
+    monkeypatch.setattr(ce, "EXA_CONTACT_ENRICH_WORKER_CONCURRENCY", 3)
+    monkeypatch.setattr(ce, "_EXA_SEMAPHORE", None)
+    monkeypatch.setattr(ce, "_JOB_EXA_SEMAPHORES", {})
+    state = {"now": 0, "peak": 0}
+
+    async def lookup(job):
+        async with ce._exa_slot(job):
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+            await asyncio.sleep(0.01)
+            state["now"] -= 1
+
+    async def main():
+        await asyncio.gather(*(lookup(j) for j in ("a", "b", "c") for _ in range(4)))
+
+    asyncio.run(main())
+    assert state["peak"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -543,3 +589,45 @@ def test_exa_retry_can_be_switched_off(monkeypatch):
 
     assert _lookup() == {"ok": False, "message": "Exa run failed"}
     assert len(server.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# A launch session's search defers the paid Exa contact run to S3
+# ---------------------------------------------------------------------------
+
+def test_iter_search_events_marks_criteria_deferred(monkeypatch):
+    from routers import candidates as candidates_router
+    from services.unified_candidate_search import _paid_contact_deferred
+
+    seen = {}
+
+    class _Criteria:
+        defer_paid_contact = False
+
+    async def fake_stream(criteria):
+        seen["criteria"] = criteria
+        yield {"type": "summary"}
+
+    monkeypatch.setattr(candidates_router, "build_search_criteria", lambda request: _Criteria())
+    monkeypatch.setattr(candidates_router, "_search_event_stream", fake_stream)
+
+    async def consume(**kw):
+        return [e async for e in candidates_router.iter_search_events(object(), schedule_cross_submissions=False, **kw)]
+
+    asyncio.run(consume(defer_paid_contact=True))
+    assert seen["criteria"].defer_paid_contact is True
+    assert _paid_contact_deferred({"source": "LinkedIn-Exa"}, seen["criteria"]) is True
+    assert _paid_contact_deferred({"source": "JobDiva-JobAgent"}, seen["criteria"]) is False
+
+    asyncio.run(consume())
+    assert seen["criteria"].defer_paid_contact is False
+
+
+def test_deferral_kill_switch(monkeypatch):
+    from services.unified_candidate_search import _paid_contact_deferred
+
+    class _Criteria:
+        defer_paid_contact = True
+
+    monkeypatch.setattr(sourcing_config, "SOURCING_DEFER_PAID_CONTACT_ENABLED", False)
+    assert _paid_contact_deferred({"source": "LinkedIn-Exa"}, _Criteria()) is False

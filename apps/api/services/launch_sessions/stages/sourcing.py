@@ -219,7 +219,8 @@ async def run(ctx: StageContext) -> StageResult:
             await ctx.boundary()
 
         async with contextlib.aclosing(
-            ctx.fx.search_events(request, schedule_cross_submissions=cross)
+            # S3 looks up the selected rows' contacts: no paid Exa run here.
+            ctx.fx.search_events(request, schedule_cross_submissions=cross, defer_paid_contact=True)
         ) as stream:
             async for raw in stream:
                 if isinstance(raw, dict) and raw.get("type") in _SKIP_EVENTS:
