@@ -292,6 +292,16 @@ def is_broad_region_location(value) -> bool:
     # unverified one (QA: a JobDiva row whose location was bare "NJ" was
     # never flagged "Location unverified", unlike LinkedIn's "Greater Chicago
     # Area" style labels).
+    # Guarded by "no comma": a short ambiguous token resolving via
+    # resolve_state_code ("IN", "OR", "ME", or their full names) only hits
+    # this branch when it is the ENTIRE location string with nothing else —
+    # "Washington, IN" (a real city + state) has a comma and never reaches
+    # here; it's parsed as precise city+state elsewhere. The only way the
+    # whole string collapses to a bare "IN" is a genuine state-only record
+    # (no city known at all) — e.g. _candidate_structured_locations building
+    # city_state from city="" + state="IN" strips down to "IN" exactly —
+    # which is precisely the case this function exists to flag as broad/
+    # unverified rather than silently geocode as a confirmed point.
     if "," not in text:
         return bool(resolve_state_code(text))
     return False

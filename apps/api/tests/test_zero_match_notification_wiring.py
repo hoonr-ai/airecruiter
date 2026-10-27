@@ -232,7 +232,7 @@ def test_enqueue_zero_match_notification_routes_through_task_outbox(monkeypatch)
             closed.append(True)
 
     def fake_add(cur, task_name, *args, **kwargs):
-        add_calls.append((task_name, args))
+        add_calls.append((task_name, args, kwargs))
         return 1
 
     monkeypatch.setattr(cand_module, "get_db_connection", lambda: _FakeConn())
@@ -241,7 +241,22 @@ def test_enqueue_zero_match_notification_routes_through_task_outbox(monkeypatch)
 
     cand_module._enqueue_zero_match_notification_sync("J1", "recruiter@x.com")
 
-    assert add_calls == [("zero_match_notification", ("J1", "recruiter@x.com"))]
+    assert len(add_calls) == 1
+    task_name, args, kwargs = add_calls[0]
+    assert (task_name, args) == ("zero_match_notification", ("J1", "recruiter@x.com"))
+    # PR review: a dedupe_key so a retried request can't double-insert the
+    # outbox row. Minute-grain (not date.today()) so it only collapses a
+    # near-simultaneous retry of the SAME request, not every zero-result
+    # search this recruiter runs on this job for the rest of the day — see
+    # _enqueue_zero_match_notification_sync's own docstring/comment for why
+    # a coarser key would regress create_zero_match_notification's
+    # documented "a fresh search is a fresh, separately-worth-notifying
+    # result" semantics.
+    import re
+    assert re.fullmatch(
+        r"zero_match:J1:recruiter@x\.com:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}",
+        kwargs["dedupe_key"],
+    ), kwargs["dedupe_key"]
     assert committed == [True]
     assert closed == [True]
 

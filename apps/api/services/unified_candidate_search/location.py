@@ -853,6 +853,17 @@ class LocationMixin:
                 and not (known_states - unlabeled_states)
                 and required.get("state")
             ):
+                # _ADJACENT_STATES (above) is hand-curated and only lists the
+                # metros recruiters actually ask about — a search state
+                # that's missing from it (most are) simply has no adjacency
+                # entries, so .get(..., set()) is empty and every bare state
+                # other than an exact match still hard-drops below. That's
+                # the deliberately conservative fallback: an unlisted pair
+                # falls back to today's behavior (hard-drop) rather than
+                # silently guessing at adjacency, same trade-off as every
+                # other "we don't have data for this, so don't soft-keep
+                # past it" choice in this module (e.g. an unrecognized broad
+                # label's core city in _REGION_CORE_CITY).
                 nearby = {s.upper() for s in self._ADJACENT_STATES.get(required["state"].upper(), set())}
                 nearby.add(required["state"].upper())
                 if all(s.upper() in nearby for s in unlabeled_states):

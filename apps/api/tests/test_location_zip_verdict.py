@@ -577,6 +577,85 @@ def test_region_state_labels_and_core_city_tables_stay_in_sync():
     assert not missing_state, f"labels with a core city but no state: {missing_state}"
 
 
+def test_region_label_key_strips_trailing_state_suffix(svc):
+    """PR review follow-up: _region_label_key now strips a trailing ", ST"
+    so a label carrying one ("Queens County, NY") still finds its
+    state-less table entry ("queens county"). Covers the stripping
+    directly, plus guards the exact collision risk the review flagged:
+    none of today's registered keys may themselves end in that ", ST"
+    shape, since stripping it would then look up the WRONG (truncated)
+    key instead of the intended one."""
+    import re as _re
+
+    from services.location import _REGION_CORE_CITY, _REGION_STATE_LABELS, _region_label_key
+
+    assert _region_label_key("Queens County, NY") == "queens county"
+    assert _region_label_key("Queens County") == "queens county"
+    assert _region_label_key("queens county, ny") == "queens county"
+    # Unaffected: no trailing 2-letter suffix to strip.
+    assert _region_label_key("Greater Chicago Area") == "greater chicago area"
+    # The "united states"/"usa" suffix strip still takes priority and still
+    # works for a 2-letter-shaped tail that isn't a real state suffix
+    # pattern match target here, just confirming no interaction bug.
+    assert _region_label_key("New York, United States") == "new york"
+
+    suffixed_keys = {k for k in set(_REGION_STATE_LABELS) | set(_REGION_CORE_CITY) if _re.search(r",\s*[A-Za-z]{2}$", k)}
+    assert not suffixed_keys, (
+        f"registered keys ending in a bare ', ST' suffix would be silently "
+        f"truncated by _region_label_key's own stripping on lookup: {suffixed_keys}"
+    )
+
+
+def test_is_labeled_region_distinguishes_named_metros_from_bare_states():
+    """PR review follow-up: is_labeled_region gates the state_mismatch
+    demotion in _single_location_match_verdict — a named, curated metro
+    label must say True (its adjacency is hand-listed), a bare state name/
+    code must say False (no such curation exists for it)."""
+    from services.location import is_labeled_region
+
+    assert is_labeled_region("Greater Chicago Area") is True
+    assert is_labeled_region("greater philadelphia area") is True
+    assert is_labeled_region("Queens County, NY") is True  # added by this PR
+    assert is_labeled_region("NJ") is False
+    assert is_labeled_region("New Jersey") is False
+    assert is_labeled_region("Not A Real Region") is False
+
+
+def test_bare_state_mismatch_falls_back_to_hard_drop_when_adjacency_unknown(svc):
+    """PR review follow-up: _ADJACENT_STATES is hand-curated and doesn't
+    cover every state. A bare state for a search state that's absent from
+    the map (e.g. Maine, "ME", has no entry) must fall back to today's
+    hard-drop behavior rather than silently guessing it might be nearby —
+    the documented, deliberately conservative trade-off."""
+    assert "ME" not in svc._ADJACENT_STATES
+    bare_other = {"location": "NH"}  # New Hampshire, genuinely not Maine
+    veto = svc._location_hard_gate(bare_other, _criteria(location="Portland, ME", within_miles=25))
+    assert veto
+    assert bare_other.get("location_veto_reason") == "state_mismatch"
+
+
+def test_bare_state_branch_does_not_swallow_a_precise_city_state(svc):
+    """PR review follow-up: is_broad_region_location's bare-state check is
+    guarded by "no comma in the string" specifically so a real city+state
+    pair that happens to end in a short, state-code-shaped token ("Washington,
+    IN" — Washington, Indiana) is never misread as a bare state. It has a
+    comma, so it never reaches that branch at all; it resolves as a normal
+    precise city+state match instead."""
+    from services.location import is_broad_region_location
+
+    assert is_broad_region_location("Washington, IN") is False
+    assert is_broad_region_location("IN") is True  # bare, no comma — the actual target case
+
+    washington_in = {"location": "Washington, IN"}
+    svc._location_hard_gate(washington_in, _criteria(location="Indianapolis, IN", within_miles=50))
+    # Resolved as a precise same-state city with a real offline distance
+    # (~96mi, genuinely outside this radius) — NOT the broad/unverified
+    # branch the bare-state check would wrongly route it through if the
+    # comma guard were ever lost.
+    assert washington_in.get("location_match_reason") == "outside_radius_confirmed"
+    assert isinstance(washington_in.get("distance_miles"), float)
+
+
 def test_broad_region_bare_literals_do_not_over_match_prefixed_strings():
     """"chicagoland" and "silicon valley" are bare literals (no leading `.+`
     wildcard) in _BROAD_REGION_RE, matched via .fullmatch(). A prefixed

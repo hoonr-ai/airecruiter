@@ -1114,10 +1114,29 @@ def _enqueue_zero_match_notification_sync(job_id: str, searcher_email: str) -> N
     """
     from services import task_outbox
 
+    # Minute-grain, not day-grain (PR review suggested a date.today() key):
+    # notifications_service.py's own docstring for zero_match_warning is
+    # explicit that re-running a tweaked search later and getting 0 again is
+    # "a fresh, separately-worth-notifying result" — the same job-level
+    # dedup shape as pair_launched/recruiter_assigned
+    # (_job_level_duplicate_in_last_minute), which only collapses the exact
+    # same event fired again within about a minute (a client retry or a
+    # race), not every zero-result search by this recruiter on this job for
+    # the rest of the day. This key exists only to stop THIS call path from
+    # double-inserting the outbox row for one retried request; the minute
+    # bucket matches that scope without reintroducing the "only ever once"
+    # behavior the module docstring specifically warns against for this type.
+    dedupe_key = (
+        f"zero_match:{job_id}:{searcher_email}:"
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}"
+    )
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            task_outbox.add(cur, ZERO_MATCH_NOTIFICATION, str(job_id), searcher_email)
+            task_outbox.add(
+                cur, ZERO_MATCH_NOTIFICATION, str(job_id), searcher_email,
+                dedupe_key=dedupe_key,
+            )
         conn.commit()
     finally:
         conn.close()
@@ -1156,6 +1175,20 @@ def _maybe_notify_zero_match(
     most one per search, the stream's terminal event) — fire-and-forget via
     core.tasks.spawn so a slow/failed DB write can never stall or break the
     NDJSON stream still being delivered to the client.
+
+    PR review: this still leaves a (much narrower) window — a process crash
+    between the stream emitting its terminal event and the spawned task's
+    own task_outbox insert committing would drop the notification with
+    nothing to retry it, same as the co-recruiter notifications a few
+    screens down in this file that are spawned the same way ("both calls
+    swallow their own errors regardless, so nothing is lost by deferring").
+    Putting the outbox insert on the request's own transaction (the way
+    save_candidate_feedback does for candidate_callback_reminder) would
+    close it, at the cost of making every zero-result search wait on a DB
+    round-trip before the stream can finish — not worth it for a response
+    this infrequent (it fires once per empty search, not once per
+    candidate); the bug this function exists to fix was total, permanent
+    silence from a stale/dead worker, not this far smaller race.
     """
     try:
         if all_sources_failed:
