@@ -17,11 +17,12 @@ Environment=PYTHONPATH=/home/ubuntu/codebase/airecruiter/apps/api
 # to the OS. Two arenas per process trades a little allocator contention for
 # far lower RSS growth across the 8 workers.
 Environment=MALLOC_ARENA_MAX=2
-# --limit-max-requests: a worker exits gracefully after ~5000 requests and the
-# uvicorn supervisor (>= 0.30) starts a fresh one, so slow per-worker memory
-# growth can't reach the kernel OOM killer. Startup work runs once per boot,
-# not per recycled worker (core/startup_once.py).
-ExecStart=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 8 --limit-max-requests 5000
+# --limit-max-requests: a worker exits gracefully after this many requests and
+# the uvicorn supervisor (>= 0.30) starts a fresh one, so slow per-worker
+# memory growth can't reach the kernel OOM killer. 2000 (was 5000): workers
+# reached ~2.5 GB before recycling. Startup work runs once per boot, not per
+# recycled worker (core/startup_once.py).
+ExecStart=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 8 --limit-max-requests 2000
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=10
@@ -34,6 +35,16 @@ SyslogIdentifier=airecruiter-api
 # Security and resource limits
 NoNewPrivileges=true
 LimitNOFILE=65536
+# Memory for the whole service (all 8 workers + the supervisor), as a share of
+# the VM's RAM so it fits any VM size and leaves room for the web app, nginx
+# and Redis. Past MemoryHigh the kernel reclaims from these processes first;
+# at MemoryMax it OOM-kills inside this service only (the largest worker,
+# which the supervisor restarts) instead of picking anything on the box.
+MemoryHigh=70%
+MemoryMax=80%
+# systemd's default (stop) would take the whole API down when one worker is
+# OOM-killed; continue lets the uvicorn supervisor replace just that worker.
+OOMPolicy=continue
 TimeoutStartSec=60
 TimeoutStopSec=30
 
