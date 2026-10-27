@@ -442,6 +442,21 @@ else
     print_warning "Web service file not found in systemd/ directory"
 fi
 
+# airecruiter-worker (arq) runs the task_outbox relay — candidate_callback_reminder
+# notifications and every other queued task included. This file/enable/restart
+# block was missing entirely, so a deploy left the worker running whatever code
+# it last booted with while the API moved on, and the two relays (API's own
+# scheduler and the worker's arq cron, see services/task_outbox.py) raced each
+# other on the same rows: the stale worker's claims failed as "unknown task"
+# while the freshly-restarted API's claims still succeeded, intermittently
+# dropping notifications. Restart it every deploy, same as the API.
+if [ -f "$PROJECT_DIR/systemd/airecruiter-worker.service" ]; then
+    sudo cp "$PROJECT_DIR/systemd/airecruiter-worker.service" /etc/systemd/system/
+    print_status "Worker service file installed"
+else
+    print_warning "Worker service file not found in systemd/ directory"
+fi
+
 print_status "Systemd services configured"
 
 # Configure firewall
@@ -457,7 +472,7 @@ print_status "Firewall configured"
 # Enable services and start them
 echo -e "${BLUE}🔧 Enabling and starting services...${NC}"
 sudo systemctl daemon-reload
-sudo systemctl enable airecruiter-api airecruiter-web
+sudo systemctl enable airecruiter-api airecruiter-web airecruiter-worker
 
 # Restart services to pick up new changes
 echo -e "${BLUE}🔄 Restarting services...${NC}"
@@ -470,6 +485,16 @@ else
 fi
 
 sleep 3
+
+if systemctl is-active --quiet airecruiter-worker; then
+    sudo systemctl restart airecruiter-worker
+    print_status "Worker service restarted"
+else
+    sudo systemctl start airecruiter-worker
+    print_status "Worker service started"
+fi
+
+sleep 2
 
 if systemctl is-active --quiet airecruiter-web; then
     sudo systemctl restart airecruiter-web
@@ -488,12 +513,19 @@ echo -e "${BLUE}🔍 Verifying deployment...${NC}"
 sleep 3
 
 api_status=$(systemctl is-active airecruiter-api)
+worker_status=$(systemctl is-active airecruiter-worker)
 web_status=$(systemctl is-active airecruiter-web)
 
 if [ "$api_status" = "active" ]; then
     print_status "API service is running"
 else
     print_error "API service failed to start - check: journalctl -u airecruiter-api"
+fi
+
+if [ "$worker_status" = "active" ]; then
+    print_status "Worker service is running"
+else
+    print_error "Worker service failed to start - check: journalctl -u airecruiter-worker"
 fi
 
 if [ "$web_status" = "active" ]; then

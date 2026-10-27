@@ -503,6 +503,64 @@ def test_hard_gate_drops_newly_recognized_regions_in_the_wrong_state(svc):
     assert tampa.get("location_veto_reason") == "state_mismatch"
 
 
+def test_hard_gate_drops_confirmed_far_regions_qa_2026_10_27(svc):
+    """QA regression (2026-10-27 multi-ZIP run): "Queens County, NY" (~293mi
+    from a 25mi Frewsburg, NY 14738 search), "San Diego Metropolitan Area"
+    (~458mi from a 25mi San Francisco 94111 search), and "Buffalo-Niagara
+    Falls Area" (~40mi from the same Frewsburg search) were all soft-kept
+    forever — none of the three labels had a _REGION_CORE_CITY entry, so
+    _broad_core_radius_distance always returned None regardless of true
+    distance. Queens and Buffalo-Niagara also exercise the ", NY" suffix
+    that _region_label_key must strip to find the state-less table entry."""
+    queens = {"location": "Queens County, NY"}
+    veto = svc._location_hard_gate(queens, _criteria(location="Frewsburg, NY 14738", within_miles=25))
+    assert veto and "outside" in veto
+    assert queens.get("location_veto_reason") == "outside_radius_confirmed"
+    assert queens.get("distance_miles") > 100
+
+    san_diego = {"location": "San Diego Metropolitan Area"}
+    veto = svc._location_hard_gate(san_diego, _criteria(location="San Francisco, CA 94111", within_miles=25))
+    assert veto and "outside" in veto
+    assert san_diego.get("location_veto_reason") == "outside_radius_confirmed"
+    assert san_diego.get("distance_miles") > 100
+
+    # Buffalo's core is ~59mi from Frewsburg — within the 25+50mi buffer, so
+    # this one stays a deliberate soft-keep (the buffer exists precisely so a
+    # metro label's single representative point doesn't hard-drop a real
+    # edge-of-metro candidate). The regression this guards is that it now
+    # gets a REAL computed distance at all, instead of being stuck behind
+    # the None-core sentinel forever regardless of true distance.
+    buffalo = {"location": "Buffalo-Niagara Falls Area"}
+    assert svc._location_hard_gate(
+        buffalo, _criteria(location="Frewsburg, NY 14738", within_miles=25)
+    ) is None
+    assert buffalo.get("location_match_reason") == "broad_region_unverified"
+    assert buffalo.get("distance_miles") is None  # soft-keep still suppresses the badge value
+
+
+def test_bare_state_location_is_unverified_not_silently_confirmed(svc):
+    """QA regression (2026-10-27): a candidate whose entire location text is
+    a bare state ("NJ", no city, no comma) matched neither
+    is_broad_region_location's old checks nor the "precise" city+state
+    shape, so it fell through to a live Nominatim geocode of "NJ" alone,
+    which resolves to a real (state-centroid) point and was reported as a
+    CONFIRMED match/distance — never flagged "Location unverified", unlike
+    LinkedIn's "Greater Chicago Area"-style broad labels. Also must not
+    start hard-dropping a bare state that's a neighbor of the search's own
+    state (NJ candidates a few miles from NYC are a QA-confirmed case that
+    must stay soft-kept)."""
+    bare_nj = {"location": "NJ"}
+    assert svc._location_hard_gate(bare_nj, _criteria(location="New York, NY", within_miles=25)) is None
+    assert bare_nj.get("location_match_reason") == "broad_region_unverified"
+    assert bare_nj.get("location_veto_reason") is None
+
+    # A bare state with no plausible proximity to the search still drops.
+    bare_ca = {"location": "CA"}
+    veto = svc._location_hard_gate(bare_ca, _criteria(location="New York, NY", within_miles=25))
+    assert veto
+    assert bare_ca.get("location_veto_reason") == "state_mismatch"
+
+
 def test_region_state_labels_and_core_city_tables_stay_in_sync():
     """PR #859 review: _REGION_STATE_LABELS and _REGION_CORE_CITY
     (services/location.py) are two hand-maintained dicts that must agree —
