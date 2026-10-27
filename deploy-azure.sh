@@ -442,6 +442,39 @@ else
     print_warning "Web service file not found in systemd/ directory"
 fi
 
+# airecruiter-worker (arq) runs the task_outbox relay — candidate_callback_reminder
+# notifications and every other queued task included. This file/enable/restart
+# block was missing entirely, so a deploy left the worker running whatever code
+# it last booted with while the API moved on, and the two relays (API's own
+# scheduler and the worker's arq cron, see services/task_outbox.py) raced each
+# other on the same rows: the stale worker's claims failed as "unknown task"
+# while the freshly-restarted API's claims still succeeded, intermittently
+# dropping notifications. Restart it every deploy, same as the API.
+#
+# Only when this host's own .env actually turns arq on (ARQ_ENABLED=true) —
+# core/queue.py's enqueue() and services/task_outbox.py's relay both already
+# fall back to running in-process when it's off, so nothing needs the worker
+# in that case. PROD's .env.example documents ARQ_ENABLED defaulting off
+# there (core/config.py get_env_bool default); unconditionally enabling and
+# starting `arq worker.WorkerSettings` with no REDIS_URL would crash-loop the
+# unit forever under systemd's Restart=always (PR review).
+WORKER_ARQ_ENABLED=false
+if [ -f "$API_DIR/.env" ]; then
+    _arq_env_val=$(grep -E '^ARQ_ENABLED=' "$API_DIR/.env" | tail -n1 | cut -d'=' -f2- | tr -d '"'"'"' \r')
+    case "$(echo "$_arq_env_val" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) WORKER_ARQ_ENABLED=true ;;
+    esac
+fi
+
+if [ "$WORKER_ARQ_ENABLED" = true ] && [ -f "$PROJECT_DIR/systemd/airecruiter-worker.service" ]; then
+    sudo cp "$PROJECT_DIR/systemd/airecruiter-worker.service" /etc/systemd/system/
+    print_status "Worker service file installed"
+elif [ "$WORKER_ARQ_ENABLED" = true ]; then
+    print_warning "Worker service file not found in systemd/ directory"
+else
+    print_status "ARQ_ENABLED is not set in $API_DIR/.env — skipping the arq worker (API/task_outbox already run in-process without it)"
+fi
+
 print_status "Systemd services configured"
 
 # Configure firewall
@@ -457,7 +490,15 @@ print_status "Firewall configured"
 # Enable services and start them
 echo -e "${BLUE}🔧 Enabling and starting services...${NC}"
 sudo systemctl daemon-reload
-sudo systemctl enable airecruiter-api airecruiter-web
+if [ "$WORKER_ARQ_ENABLED" = true ]; then
+    sudo systemctl enable airecruiter-api airecruiter-web airecruiter-worker
+else
+    sudo systemctl enable airecruiter-api airecruiter-web
+    # Make sure a leftover worker from a previous deploy (or a manual start)
+    # isn't left running stale code with nothing managing it, now that this
+    # host's .env says arq is off.
+    sudo systemctl disable --now airecruiter-worker 2>/dev/null || true
+fi
 
 # Restart services to pick up new changes
 echo -e "${BLUE}🔄 Restarting services...${NC}"
@@ -470,6 +511,18 @@ else
 fi
 
 sleep 3
+
+if [ "$WORKER_ARQ_ENABLED" = true ]; then
+    if systemctl is-active --quiet airecruiter-worker; then
+        sudo systemctl restart airecruiter-worker
+        print_status "Worker service restarted"
+    else
+        sudo systemctl start airecruiter-worker
+        print_status "Worker service started"
+    fi
+fi
+
+sleep 2
 
 if systemctl is-active --quiet airecruiter-web; then
     sudo systemctl restart airecruiter-web
@@ -496,10 +549,38 @@ else
     print_error "API service failed to start - check: journalctl -u airecruiter-api"
 fi
 
+# Unlike api_status/web_status above, this must not just print and move on
+# (PR review: "that's the exact silent-stale-worker failure mode this PR is
+# trying to eliminate") — a dead worker on a host that declared it wants arq
+# (ARQ_ENABLED=true) silently drops every queued notification and arq-only
+# task with no other symptom, which is the entire bug this deploy fix exists
+# to close. `|| true` keeps this from tripping `set -e` on its own (a bare
+# `x=$(systemctl is-active ...)` aborts the script right here with no
+# message at all when the unit isn't active); DEPLOY_FAILED instead exits
+# with a clear message once every other check below has also had a chance
+# to report. Skipped entirely when this host's .env has arq off — nothing
+# depends on the worker there (see WORKER_ARQ_ENABLED above).
+DEPLOY_FAILED=false
+if [ "$WORKER_ARQ_ENABLED" = true ]; then
+    worker_status=$(systemctl is-active airecruiter-worker || true)
+    if [ "$worker_status" = "active" ]; then
+        print_status "Worker service is running"
+    else
+        print_error "Worker service failed to start (status: ${worker_status:-unknown}) - check: journalctl -u airecruiter-worker"
+        DEPLOY_FAILED=true
+    fi
+fi
+
 if [ "$web_status" = "active" ]; then
     print_status "Web service is running"
 else
     print_error "Web service failed to start - check: journalctl -u airecruiter-web"
+fi
+
+if [ "$DEPLOY_FAILED" = true ]; then
+    echo "::error::airecruiter-worker failed to start on a host with ARQ_ENABLED=true — queued notifications would silently stop working"
+    print_error "Aborting deploy: the worker is required on this host and isn't running."
+    exit 1
 fi
 
 # Test local connectivity. /api/health answers 503 when Postgres is down and

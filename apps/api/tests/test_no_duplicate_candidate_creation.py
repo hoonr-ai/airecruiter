@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient
 
 import routers.candidates as cands
 import routers.engagement as eng
+from routers.engagement import common as eng_common, provisioning as eng_provisioning  # noqa: E402
 import services.jobdiva as jd
 from core.auth import UserIdentity, get_current_user
 from services.auto_assign_service import AutoAssignService, _phone_index_keys
@@ -51,12 +52,12 @@ def _provision(monkeypatch, rows, fake, job="26-2"):
     async def _job_ids(_job):
         return 31920033, job
 
-    monkeypatch.setattr(eng, "get_db_connection", lambda: _Conn(rows))
-    monkeypatch.setattr(eng, "_resolve_provisioning_job_ids", _job_ids)
-    monkeypatch.setattr(eng, "jobdiva_service", fake)
-    monkeypatch.setattr(eng, "_utc_now_iso", lambda: "2026-09-17T00:00:00+00:00")
+    monkeypatch.setattr(eng_provisioning, "get_db_connection", lambda: _Conn(rows))
+    monkeypatch.setattr(eng_provisioning, "_resolve_provisioning_job_ids", _job_ids)
+    monkeypatch.setattr(eng_provisioning, "jobdiva_service", fake)
+    monkeypatch.setattr(eng_common, "_utc_now_iso", lambda: "2026-09-17T00:00:00+00:00")
     monkeypatch.setattr(
-        eng, "_persist_jobdiva_link_state",
+        eng_provisioning, "_persist_jobdiva_link_state",
         lambda cid, keys, person_delta=None, job_delta=None: persisted.append(
             {"candidate_id": cid, "person": person_delta, "job": job_delta}
         ),

@@ -266,12 +266,12 @@ def test_verdict_arrangement_only_candidate_is_location_unknown(svc, monkeypatch
     """"Remote" used to reach the geocoder as if it were a place. Now the row
     is honestly location-unknown: soft-kept with the sentinel distance (UI
     counts it under BEYOND-radius) and no geocode attempt."""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def boom(*a, **kw):
         raise AssertionError("must not geocode a work-arrangement string")
 
-    monkeypatch.setattr(ucs, "within_radius", boom)
+    monkeypatch.setattr(ucs_location, "within_radius", boom)
     ok, reason, dist = svc._location_match_verdict(
         {"location": "Remote", "enhanced_info": {"current_location": "Remote"}},
         _criteria(),

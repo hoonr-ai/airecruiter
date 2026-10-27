@@ -63,7 +63,6 @@ from models import (
     JobDraftResponse, JobPublishRequest, JobBasicInfoUpdate, SkillsExtractionRequest, SkillsExtractionResponse,
     JobSkillsSummaryResponse, ExternalJobCreateRequest, ManualCandidateRequest
 )
-from matcher import mock_match_candidates
 from services.extractor import llm_extractor
 from services import jobdiva_rate_limit
 from services.jobdiva import jobdiva_service
@@ -250,6 +249,9 @@ async def lifespan(app: FastAPI):
         # In-app notifications table.
         if notifications_router is not None and hasattr(notifications_router, "init_notifications_schema"):
             steps.append(("notifications_schema_init", notifications_router.init_notifications_schema, 10))
+        # After notifications: its index is on that table.
+        if recruiter_handoff_router is not None and hasattr(recruiter_handoff_router, "init_recruiter_handoff_schema"):
+            steps.append(("recruiter_handoff_schema_init", recruiter_handoff_router.init_recruiter_handoff_schema, 10))
 
         # Imported inside each step so a broken module fails only its step.
         async def _scs_init():
@@ -279,6 +281,9 @@ async def lifespan(app: FastAPI):
         # Launch; docs/launch-sessions.md). New tables only: no ALTER on a
         # hot table.
         steps.append(("launch_sessions_schema_init", _launch_sessions_init, 10))
+        # task_outbox (services/task_outbox.py). New table only.
+        from services import task_outbox as _task_outbox
+        steps.append(("task_outbox_schema_init", _task_outbox.init_task_outbox_schema, 10))
 
         ok = True
         for name, fn, timeout in steps:
@@ -289,6 +294,38 @@ async def lifespan(app: FastAPI):
         await run_schema_once("schemas", _init_schemas)
     except Exception as e:  # noqa: BLE001 - schema init must never block boot
         logger.error(f"startup_schema_init_failed: {e}; continuing")
+
+    # Transactional outbox relay (services/task_outbox.py). Registered only
+    # AFTER schema init (above), not before: relay_once() dispatches tasks
+    # whose notification INSERTs target indexes schema init itself creates
+    # (e.g. candidate_callback_reminder's own uniq_notifications_callback_
+    # reminder_occurrence) — scheduling this interval job earlier risked its
+    # very first 10s tick firing before that index existed (PR #856 review:
+    # a worker restart with outbox rows already due could then hit the same
+    # "no unique or exclusion constraint matching the ON CONFLICT
+    # specification" error PR #805's own fix exists to prevent). Runs here
+    # unconditionally now, even with ARQ_ENABLED — previously skipped
+    # whenever arq was enabled, so a dead/never-deployed arq worker meant
+    # NOTHING relayed the outbox (including every candidate_callback_
+    # reminder), with only check_lag's log line to notice. Safe to run
+    # alongside the arq worker: FOR UPDATE SKIP LOCKED means any number of
+    # relays can claim rows without double-processing. Dispatch itself
+    # needs nothing worker-only — relay_once() calls each task's plain
+    # function directly, against the same services/DB the API already uses.
+    from services import task_outbox as _task_outbox_relay
+    scheduler.add_job(
+        background_transaction("scheduler/task_outbox_relay")(_task_outbox_relay.relay_once),
+        "interval", seconds=10, id="task_outbox_relay", max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        background_transaction("scheduler/task_outbox_purge")(_task_outbox_relay.purge_old),
+        "cron", hour=3, minute=17, id="task_outbox_purge", max_instances=1, coalesce=True,
+    )
+    from services import task_outbox as _task_outbox_lag
+    scheduler.add_job(
+        _task_outbox_lag.check_lag, "interval", minutes=5, id="task_outbox_lag_check",
+        max_instances=1, coalesce=True,
+    )
 
     # JobDiva BI mirror sync. Every worker schedules it; an advisory lock lets
     # one run each cycle. Delayed like the auto-sync so boot stays uncontested.
@@ -524,6 +561,8 @@ async def lifespan(app: FastAPI):
     try:
         from core.tasks import drain as _drain_background_tasks
         await _drain_background_tasks()
+        from core.queue import close_pool as _close_queue_pool
+        await _close_queue_pool()
     except Exception as _drain_err:  # noqa: BLE001
         logger.warning("background task drain failed: %s", _drain_err)
     
@@ -567,6 +606,7 @@ recruiter_analytics_router = _safe_import("recruiter_analytics")
 job_step_time_router = _safe_import("job_step_time")
 launch_timing_router = _safe_import("launch_timing")
 recruiter_activity_router = _safe_import("recruiter_activity")
+user_sessions_router = _safe_import("user_sessions")
 launch_sessions_router = _safe_import("launch_sessions")
 campaigns_router = _safe_import("campaigns")
 teams_router = _safe_import("teams")
@@ -578,6 +618,7 @@ apollo_webhook_router = _safe_import("apollo_webhook")
 dnc_webhook_router = _safe_import("dnc_webhook")
 notifications_router = _safe_import("notifications")
 pairbot_webhook_router = _safe_import("pairbot_webhook")
+recruiter_handoff_router = _safe_import("recruiter_handoff")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -625,6 +666,7 @@ _mount(recruiter_analytics_router, "recruiter_analytics")
 _mount(job_step_time_router, "job_step_time")
 _mount(launch_timing_router, "launch_timing")
 _mount(recruiter_activity_router, "recruiter_activity")
+_mount(user_sessions_router, "user_sessions")
 _mount(launch_sessions_router, "launch_sessions")
 _mount(teams_router, "teams")
 _mount(org_hierarchy_router, "org_hierarchy")
@@ -641,6 +683,7 @@ _mount(campaigns_router, "campaigns", prefix="/api")
 _mount(apollo_webhook_router, "apollo_webhook", prefix="/api")
 _mount(dnc_webhook_router, "dnc_webhook")
 _mount(pairbot_webhook_router, "pairbot_webhook")
+_mount(recruiter_handoff_router, "recruiter_handoff")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
 _mount(notifications_router, "notifications", prefix="/api/v1/notifications")
 

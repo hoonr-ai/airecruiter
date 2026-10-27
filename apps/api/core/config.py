@@ -58,6 +58,12 @@ SKIP_LLM_IF_STRUCTURED = get_env_with_default("SKIP_LLM_IF_STRUCTURED", "false")
 REDIS_URL = get_env_with_default("REDIS_URL", "")
 LLM_CACHE_ENABLED = get_env_bool("LLM_CACHE_ENABLED", True)
 
+# ---- Durable job queue (arq on REDIS_URL) ----
+# Off by default: with it off, core.queue.enqueue runs tasks in-process via
+# core.tasks.spawn, as before. Turn on only after the airecruiter-worker
+# service is running, or queued jobs sit in Redis unprocessed.
+ARQ_ENABLED = get_env_bool("ARQ_ENABLED", False)
+
 # Debugging
 DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
 OPENAI_API_KEY = get_env_or_fail("OPENAI_API_KEY")
@@ -563,6 +569,13 @@ EMBEDDING_CACHE_MAX = int(get_env_with_default("EMBEDDING_CACHE_MAX", "5000"))
 # under max_connections; raise via env if QueuePool timeouts show up under load.
 SQLA_POOL_SIZE = int(get_env_with_default("SQLA_POOL_SIZE", "3"))
 SQLA_MAX_OVERFLOW = int(get_env_with_default("SQLA_MAX_OVERFLOW", "2"))
+# Per-engine pools, tunable without touching the shared pair above.
+# sourced_candidates_storage carries LLM-concurrent and bulk work, so it gets
+# more headroom (was 5 + 10); dnc_storage is small point lookups.
+SOURCED_CANDIDATES_POOL_SIZE = int(get_env_with_default("SOURCED_CANDIDATES_POOL_SIZE", "5"))
+SOURCED_CANDIDATES_MAX_OVERFLOW = int(get_env_with_default("SOURCED_CANDIDATES_MAX_OVERFLOW", "5"))
+DNC_POOL_SIZE = int(get_env_with_default("DNC_POOL_SIZE", "3"))
+DNC_MAX_OVERFLOW = int(get_env_with_default("DNC_MAX_OVERFLOW", "2"))
 
 # Per-family override for the embedding skill matcher. Keyword fuzzy
 # matching misses non-IT synonymy ("Stakeholder Management" ↔ "Executive

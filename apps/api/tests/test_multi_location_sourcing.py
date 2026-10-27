@@ -150,6 +150,165 @@ def test_linkedin_source_queries_each_selected_location_and_deduplicates():
 
 
 # ---------------------------------------------------------------------------
+# Exa sources: variants that search the same location string run once
+# ---------------------------------------------------------------------------
+
+class _ExaStub:
+    """Records the location each Exa people search / Dice search was asked for."""
+
+    def __init__(self):
+        self.locations = []
+        self.dice_locations = []
+
+    async def search_candidates(self, **kwargs):
+        self.locations.append(kwargs["location"])
+        return [{"id": "exa_linkedin.com/in/same", "profile_url": "https://www.linkedin.com/in/same",
+                 "source": "LinkedIn-Exa"}]
+
+    async def search_dice_candidates(self, **kwargs):
+        self.dice_locations.append(kwargs["location"])
+        return [{"id": "dice_0_x", "profile_url": "https://www.dice.com/x", "source": "Dice"}]
+
+
+def _remote_criteria(**kw):
+    return SearchCriteria(
+        job_id="26-100",
+        location="New York, NY",
+        location_type="Remote",
+        additional_locations=[
+            LocationEntry(value="Austin, TX", within_miles=25),
+            LocationEntry(value="Denver, CO", within_miles=25),
+        ],
+        open_to_work=False,
+        **kw,
+    )
+
+
+def test_remote_multi_location_dedupes_exa_variants():
+    """A Remote job searches its country whatever the location, so its three
+    locations used to buy the same Exa searches three times."""
+    service = _service()
+    service.exa_service = _ExaStub()
+
+    result = asyncio.run(service._search_exa(_remote_criteria()))
+
+    assert service.exa_service.locations == ["United States"]
+    assert [c["id"] for c in result["candidates"]] == ["exa_linkedin.com/in/same"]
+    assert result["source_type"] == "LinkedIn-Exa"
+
+
+def test_remote_multi_location_dedupes_dice_variants():
+    service = _service()
+    service.exa_service = _ExaStub()
+
+    asyncio.run(service._search_dice(_remote_criteria()))
+
+    assert service.exa_service.dice_locations == ["United States"]
+
+
+def test_onsite_distinct_locations_still_search_each_for_exa():
+    service = _service()
+    service.exa_service = _ExaStub()
+    criteria = SearchCriteria(
+        job_id="26-100",
+        location="New York, NY",
+        additional_locations=[LocationEntry(value="Menlo Park, CA", within_miles=25)],
+        open_to_work=False,
+    )
+
+    asyncio.run(service._search_exa(criteria))
+
+    assert sorted(service.exa_service.locations) == ["Menlo Park, CA", "New York, NY, United States"]
+
+
+def test_resolve_bare_zip_for_external_source_returns_city_state():
+    """A bare ZIP carries no signal once it reaches Exa/Dice: their query
+    builder strips every digit out of the location text
+    (exa_service._strip_zip_for_query — LinkedIn profile location lines
+    never show a zip), so "07310, United States" degenerated to just
+    "United States" and the search silently lost its location entirely.
+    Resolving the zip to "City, ST" first — the same backfill JobDiva's own
+    geo resolution already does (_resolve_jobdiva_geo) — keeps a real place
+    name in the text the whole way through."""
+    service = _service()
+    # Stubbed rather than relying on the bundled zip dataset's real content
+    # for 07310/00000 — hermetic to dataset changes, same shape lookup_zip
+    # actually returns ({"zip", "city", "state", "lat", "lng"} or None).
+    fake_entry = {"zip": "07310", "city": "Jersey City", "state": "NJ", "lat": 40.0, "lng": -74.0}
+    with patch("services.zip_index.lookup_zip", side_effect=lambda z: fake_entry if z == "07310" else None):
+        assert service._resolve_bare_zip_for_external_source("07310") == "Jersey City, NJ"
+        # A city/state string, or anything that isn't a bare 5-digit zip,
+        # must pass through unchanged — this only targets the bare-zip case.
+        assert service._resolve_bare_zip_for_external_source("New York, NY") == "New York, NY"
+        assert service._resolve_bare_zip_for_external_source("") == ""
+        assert service._resolve_bare_zip_for_external_source("00000") == "00000"  # unknown zip
+
+
+def test_onsite_bare_zip_location_resolves_to_city_state_for_exa():
+    """End-to-end regression for the reported "multiple ZIP codes not
+    working in Exa sourcing" bug: a bare-ZIP additional location must reach
+    Exa as "City, ST, United States", not "07310, United States" (which
+    exa_service.compose_people_query's zip-stripping would otherwise
+    collapse to the generic, location-less "based in the United States")."""
+    service = _service()
+    service.exa_service = _ExaStub()
+    criteria = SearchCriteria(
+        job_id="26-100",
+        location="New York, NY",
+        additional_locations=[LocationEntry(value="07310", within_miles=25)],
+        open_to_work=False,
+    )
+    fake_entry = {"zip": "07310", "city": "Jersey City", "state": "NJ", "lat": 40.0, "lng": -74.0}
+
+    with patch("services.zip_index.lookup_zip", side_effect=lambda z: fake_entry if z == "07310" else None):
+        asyncio.run(service._search_exa(criteria))
+
+    assert sorted(service.exa_service.locations) == [
+        "Jersey City, NJ, United States",
+        "New York, NY, United States",
+    ]
+
+
+def test_unipile_remote_variants_are_not_deduped():
+    """Only the Exa sources pass a dedupe key (Unipile's radius and query
+    differ per location)."""
+    class UnipileStub:
+        def __init__(self):
+            self.locations = []
+
+        async def search_candidates(self, **kwargs):
+            self.locations.append(kwargs["location"])
+            return []
+
+    service = _service()
+    service.unipile_service = UnipileStub()
+
+    asyncio.run(service._search_linkedin(_remote_criteria()))
+
+    assert service.unipile_service.locations == ["United States"] * 3
+
+
+def test_a_dedupe_key_that_fails_keeps_the_variant():
+    service = _service()
+    seen = []
+
+    async def single(variant):
+        seen.append(variant.location)
+        return {"candidates": []}
+
+    def key(variant):
+        if variant.location == "Austin, TX":
+            raise ValueError("unparseable")
+        return "United States"
+
+    asyncio.run(service._fan_out_multi_location_search(
+        _remote_criteria(), single, "LinkedIn-Exa", dedupe_key=key,
+    ))
+
+    assert seen == ["New York, NY", "Austin, TX"]
+
+
+# ---------------------------------------------------------------------------
 # _location_match_verdict — candidate matches only the SECOND location
 # ---------------------------------------------------------------------------
 
@@ -288,6 +447,99 @@ def test_jobdiva_multi_location_partial_failure_is_logged():
         if "failed" in str(call).lower()
     ]
     assert failure_calls, "_log_stage was not called for the failing location"
+
+
+def test_jobdiva_additional_location_boolean_is_scoped_to_just_that_location():
+    """Regression: every additional-location TalentSearch call used to reuse
+    criteria.boolean_string — the wizard's always-non-empty, all-locations-
+    OR'd string — instead of a boolean scoped to just that location. This
+    test calls the real _search_jobdiva_talent_search (not a reimplemented
+    loop), unlike test_jobdiva_multi_location_partial_failure_is_logged above,
+    which stubs _build_boolean_string and so never exercises this line.
+
+    jobdiva.py's count_location_clauses() gate sees 2+ `"..." within N mi`
+    clauses in a boolean and skips the precise zip+radius anchor for that
+    call, on the (correct, for the ONE combined-primary call) theory that a
+    multi-chip search can't be pinned to one chip's zip. Reusing the combined
+    boolean for every additional-location call — each already scoped to
+    exactly one location — triggered that same skip for all of them,
+    silently falling back to a state-wide filter. A named "City, ST" entry
+    still returned plausible-looking results from that fallback; a bare-ZIP
+    entry (same bug) visibly never got its configured radius.
+    """
+    service = _service()
+    calls = []
+
+    async def _fake_search(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    service.jobdiva_service = MagicMock()
+    service.jobdiva_service.search_candidates = _fake_search
+    service._resolve_jobdiva_geo = MagicMock(
+        side_effect=lambda c: (["US"], [], "10001" if c.location == "New York, NY" else "07310")
+    )
+
+    criteria = SearchCriteria(
+        job_id="26-100",
+        location="New York, NY",
+        within_miles=25,
+        # Exactly what the Step 5 wizard always sends: every location OR'd
+        # into one combined text clause (see search_terms.py:429-446) — this
+        # must never leak into an additional-location call's own boolean.
+        boolean_string='("New York, NY" within 25 mi OR "07310" within 50 mi)',
+        additional_locations=[LocationEntry(value="07310", within_miles=50)],
+    )
+
+    asyncio.run(service._search_jobdiva_talent_search(criteria))
+
+    assert len(calls) == 2
+    primary_call, additional_call = calls
+    assert "New York, NY" not in additional_call["boolean_string"]
+
+    from services.jobdiva_boolean_translator import count_location_clauses
+    assert count_location_clauses(additional_call["boolean_string"]) < 2
+    # The primary call is unaffected — it's the ONE call meant to carry the
+    # full combined text, per search_terms.py's own documented design.
+    assert primary_call["boolean_string"] == criteria.boolean_string
+
+
+def test_jobdiva_additional_location_keeps_a_hand_edited_boolean_skill_term():
+    """PR review follow-up: the fix above must not rebuild the additional-
+    location boolean from alt_criteria's skills/titles from scratch — that
+    would silently discard a term the recruiter hand-added to the wizard's
+    boolean text that isn't reflected in criteria.skill_criteria. Stripping
+    just the location OR group out of criteria.boolean_string (instead of
+    rebuilding) keeps every other hand-edit intact."""
+    service = _service()
+    calls = []
+
+    async def _fake_search(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    service.jobdiva_service = MagicMock()
+    service.jobdiva_service.search_candidates = _fake_search
+    service._resolve_jobdiva_geo = MagicMock(return_value=(["US"], [], ""))
+
+    criteria = SearchCriteria(
+        job_id="26-100",
+        location="New York, NY",
+        within_miles=25,
+        # No "Rust" in skill_criteria — a term the recruiter typed directly
+        # into the wizard's boolean box, which _build_boolean_string(alt_
+        # criteria, ...) would have no way to reconstruct from scratch.
+        boolean_string='"Python" AND "Rust" AND ("New York, NY" within 25 mi OR "07310" within 50 mi)',
+        additional_locations=[LocationEntry(value="07310", within_miles=50)],
+    )
+
+    asyncio.run(service._search_jobdiva_talent_search(criteria))
+
+    assert len(calls) == 2
+    _primary_call, additional_call = calls
+    assert '"Rust"' in additional_call["boolean_string"]
+    assert '"Python"' in additional_call["boolean_string"]
+    assert "New York, NY" not in additional_call["boolean_string"]
 
 
 # ---------------------------------------------------------------------------

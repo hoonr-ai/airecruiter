@@ -135,6 +135,15 @@ _REGION_STATE_LABELS = {
     "new york city metropolitan area": frozenset({"NY", "NJ", "CT", "PA"}),
     "greater new york area": frozenset({"NY", "NJ", "CT", "PA"}),
     "dallas area": frozenset({"TX"}),
+    "boise metropolitan area": frozenset({"ID"}),
+    "greater tampa bay area": frozenset({"FL"}),
+    "tampa bay area": frozenset({"FL"}),
+    "austin, texas metropolitan area": frozenset({"TX"}),
+    "austin metropolitan area": frozenset({"TX"}),
+    "austin area": frozenset({"TX"}),
+    "queens county": frozenset({"NY"}),
+    "san diego metropolitan area": frozenset({"CA"}),
+    "buffalo-niagara falls area": frozenset({"NY"}),
 }
 
 # One city used only to decide whether a broad label can reach a circle.
@@ -163,6 +172,22 @@ _REGION_CORE_CITY = {
     "new york city metropolitan area": ("New York", "NY"),
     "greater new york area": ("New York", "NY"),
     "dallas area": ("Dallas", "TX"),
+    "boise metropolitan area": ("Boise", "ID"),
+    "greater tampa bay area": ("Tampa", "FL"),
+    "tampa bay area": ("Tampa", "FL"),
+    "austin, texas metropolitan area": ("Austin", "TX"),
+    "austin metropolitan area": ("Austin", "TX"),
+    "austin area": ("Austin", "TX"),
+    # QA (2026-10-27 multi-ZIP location run): these three labels matched
+    # _BROAD_REGION_RE (so were already soft-kept as "unverified") but had no
+    # core-city entry, so _broad_core_radius_distance always returned None
+    # and the candidate stayed soft-kept forever regardless of true distance
+    # (e.g. Queens, NY ~293mi from a 25mi Frewsburg NY search; San Diego
+    # ~458mi from a 25mi SF search; Buffalo-Niagara ~34-59mi from the same
+    # Frewsburg search) instead of being hard-dropped once confirmed far.
+    "queens county": ("New York", "NY"),
+    "san diego metropolitan area": ("San Diego", "CA"),
+    "buffalo-niagara falls area": ("Buffalo", "NY"),
 }
 
 
@@ -174,6 +199,15 @@ def _region_label_key(value) -> str:
         text,
         flags=re.IGNORECASE,
     )
+    # A trailing ", ST" is already optional/ignored by _BROAD_REGION_RE's own
+    # is_broad_region_location() match (line ~90) but wasn't stripped here —
+    # so a label carrying it ("Queens County, NY") fell through both
+    # _REGION_STATE_LABELS and _REGION_CORE_CITY even though the
+    # state-less form ("Queens County") is registered (QA: core distance
+    # silently came back None, permanently soft-keeping a confirmed-far
+    # candidate). None of the registered keys below use this suffix form, so
+    # stripping it here can only help a lookup, never collide with one.
+    text = re.sub(r",\s*[A-Za-z]{2}$", "", text)
     return text.casefold()
 
 
@@ -189,6 +223,22 @@ def region_core_city(value) -> Optional[Tuple[str, str]]:
     if not core:
         return None
     return core
+
+
+def is_labeled_region(value) -> bool:
+    """True only for a curated, named multi-state metro label (the
+    _REGION_STATE_LABELS table) — False for a bare state name/code even
+    though inferred_region_states() also resolves one of those to a state.
+
+    A named label's adjacency is hand-curated (e.g. "greater philadelphia
+    area" already lists PA/NJ/DE), so a state "mismatch" against one is
+    trustworthy enough to hard-drop. A bare state ("NJ" alone) has no such
+    curation — treating every non-matching bare state as a confirmed
+    mismatch would hard-drop a candidate a few miles across a state line
+    (QA-confirmed as a case that must stay soft-kept, not dropped). Callers
+    use this to gate state_mismatch to the labeled case only.
+    """
+    return _region_label_key(value) in _REGION_STATE_LABELS
 
 
 def inferred_region_states(value) -> frozenset:
@@ -224,15 +274,37 @@ def is_broad_region_location(value) -> bool:
         return False
     if _BROAD_REGION_RE.fullmatch(text) or _COUNTRY_ONLY_RE.fullmatch(text):
         return True
-    state_country = _STATE_COUNTRY_RE.fullmatch(text)
-    if not state_country:
-        return False
     try:
         from services.us_state_index import resolve_state_code
     except ImportError:
         logger.exception("us_state_index import failed while reading a state label")
         return False
-    return bool(resolve_state_code(state_country.group("region")))
+    state_country = _STATE_COUNTRY_RE.fullmatch(text)
+    if state_country:
+        return bool(resolve_state_code(state_country.group("region")))
+    # A bare state name/code with no city and no comma ("NJ", "New Jersey")
+    # names a whole state, not a point — same reasoning as "<state>, United
+    # States" above. Without this, a candidate whose only location text is a
+    # bare state fell through this gate entirely: not broad (here), and not
+    # "precise" either (no city to pair with it), so it skipped straight to
+    # the Nominatim geocode path, which resolves it to a real (state-centroid)
+    # point and reports that as a CONFIRMED match/distance instead of an
+    # unverified one (QA: a JobDiva row whose location was bare "NJ" was
+    # never flagged "Location unverified", unlike LinkedIn's "Greater Chicago
+    # Area" style labels).
+    # Guarded by "no comma": a short ambiguous token resolving via
+    # resolve_state_code ("IN", "OR", "ME", or their full names) only hits
+    # this branch when it is the ENTIRE location string with nothing else —
+    # "Washington, IN" (a real city + state) has a comma and never reaches
+    # here; it's parsed as precise city+state elsewhere. The only way the
+    # whole string collapses to a bare "IN" is a genuine state-only record
+    # (no city known at all) — e.g. _candidate_structured_locations building
+    # city_state from city="" + state="IN" strips down to "IN" exactly —
+    # which is precisely the case this function exists to flag as broad/
+    # unverified rather than silently geocode as a confirmed point.
+    if "," not in text:
+        return bool(resolve_state_code(text))
+    return False
 
 
 def sanitize_candidate_location(value) -> str:

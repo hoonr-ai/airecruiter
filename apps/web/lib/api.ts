@@ -211,7 +211,15 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
       redirectToSignIn();
     }
     const text = await res.text().catch(() => "");
-    throw new ApiError(res.status, path, `${res.status} ${path}${text ? `: ${text}` : ""}`);
+    let data: unknown;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // Not JSON — leave `data` undefined, callers fall back to the raw message.
+      }
+    }
+    throw new ApiError(res.status, path, `${res.status} ${path}${text ? `: ${text}` : ""}`, data);
   }
 
   return res.json() as Promise<T>;
@@ -558,6 +566,23 @@ export const api = {
         keepalive: opts.keepalive,
       }),
   },
+  // Platform sessions (routers/user_sessions.py, lib/user-session.ts): one
+  // idempotent ping is the login, the keep-alive and the Sign Out.
+  sessions: {
+    ping: (
+      body: {
+        session_id: string;
+        active_ms: number;
+        end?: "logout";
+        user_name?: string;
+        screen?: string;
+        timezone?: string;
+        language?: string;
+        entry_path?: string;
+      },
+      opts: { keepalive?: boolean } = {},
+    ) => req<{ status?: string }>(`/api/v1/sessions/ping`, { method: "POST", body, keepalive: opts.keepalive }),
+  },
   candidates: {
     save: (body: unknown) =>
       req<any>(`/candidates/save`, { method: "POST", body }),
@@ -575,8 +600,28 @@ export const api = {
       req<any>(`/candidates/${encodeURIComponent(candidateId)}/phone`, { method: "PATCH", body }),
     getFilterOptions: () =>
       req<any>(`/candidates/filter-options`),
+    // Confirms a bare 5-digit zip is a real, resolvable US zip before the
+    // Step 5 location input accepts it — see addSourceLocation's own
+    // comment in app/jobs/new/page.tsx for the bug this guards against.
+    // Discriminated on `valid`: only true carries city/state, matching the
+    // backend's own response shape (routers/candidates.py's zip-lookup).
+    lookupZip: (zip: string) =>
+      req<
+        | { status: string; valid: true; city: string; state: string }
+        | { status: string; valid: false }
+      >(`/candidates/zip-lookup?zip=${encodeURIComponent(zip)}`),
     getAllLaunched: (query?: string) =>
       req<any>(`/candidates/launched${query ? `?${query}` : ""}`),
+    getUpcomingCallbacks: () =>
+      req<any>(`/candidates/callbacks/upcoming`),
+    // rowId (list_upcoming_callbacks' own row_id) pins the action to that
+    // exact sourced_candidates row when the candidate has more than one
+    // (multi-sourced — JobDiva + LinkedIn + manual, …); omitted, the backend
+    // falls back to resolving by candidate_id/jobdiva_id as before.
+    markCallbackDone: (jobId: string, candidateId: string, rowId?: number | null) =>
+      req<any>(`/jobs/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(candidateId)}/callback/done${rowId != null ? `?row_id=${encodeURIComponent(rowId)}` : ""}`, { method: "POST" }),
+    cancelCallback: (jobId: string, candidateId: string, rowId?: number | null) =>
+      req<any>(`/jobs/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(candidateId)}/callback/cancel${rowId != null ? `?row_id=${encodeURIComponent(rowId)}` : ""}`, { method: "POST" }),
   },
   manualCandidates: {
     add: (jobRef: string, body: unknown) =>
@@ -766,7 +811,102 @@ export const api = {
       `${API_BASE}/api/v1/notifications/stream${sinceId ? `?since_id=${sinceId}` : ""}`,
   },
   launchSessions: launchSessionsApi,
+  // Recruiter warm handoff (services/recruiter_handoff.py). The backend acts
+  // as the logged-in recruiter; no email is sent from the browser.
+  handoff: {
+    state: (interviewId: number) => req<HandoffState>(`/api/v1/handoff/${interviewId}`),
+    claim: (interviewId: number) => req<HandoffClaim>(`/api/v1/handoff/${interviewId}/claim`, { method: "POST" }),
+    close: (interviewId: number, notes?: string) =>
+      req<{ state: string }>(`/api/v1/handoff/${interviewId}/close`, { method: "POST", body: { notes: notes || null } }),
+    // Recruiter copilot. context/transcript/recording may 404 while Pair-bot
+    // hasn't shipped them; callers treat a 404 as "not available".
+    context: (interviewId: number) => req<HandoffContext>(`/api/v1/handoff/${interviewId}/context`),
+    transcript: (interviewId: number) => req<HandoffTranscript>(`/api/v1/handoff/${interviewId}/transcript`),
+    recording: (interviewId: number) => req<HandoffRecording>(`/api/v1/handoff/${interviewId}/recording`),
+    resume: (interviewId: number) => req<HandoffResume>(`/api/v1/handoff/${interviewId}/resume`),
+    // After the fact, for anyone with access to the interview's job.
+    review: (interviewId: number) => req<HandoffReview>(`/api/v1/handoff/${interviewId}/review`),
+  },
 };
+
+export interface HandoffClaim {
+  livekit_url: string;
+  token: string;
+  room: string;
+  state: string;
+}
+
+export interface HandoffContextQuestion {
+  question: string;
+  answer?: string | null;
+  score?: number | null;
+  notes?: string | null;
+}
+
+export interface HandoffContext {
+  candidate_name?: string | null;
+  role_position?: string | null;
+  overall_score?: number | null;
+  hard_filter?: unknown;
+  questions?: HandoffContextQuestion[];
+  ai_transcript?: { role: string; text: string }[];
+}
+
+export interface HandoffTranscriptLine {
+  role: string;
+  text: string;
+  t?: number | string | null;
+  seq: number;
+}
+
+export interface HandoffSuggestionBatch {
+  id: string;
+  t?: number | string | null;
+  items: { question: string; why?: string | null }[];
+}
+
+export interface HandoffTranscript {
+  lines: HandoffTranscriptLine[];
+  state?: string | null;
+  suggestions?: HandoffSuggestionBatch[];
+}
+
+export interface HandoffReview {
+  interview_id: number;
+  state: HandoffState["state"];
+  recruiter_email?: string | null;
+  claimed_by_email?: string | null;
+  claimed_at?: string | null;
+  closed_at?: string | null;
+  close_reason?: string | null;
+  close_notes?: string | null;
+  transcript: { lines: HandoffTranscriptLine[]; suggestions: HandoffSuggestionBatch[] } | null;
+  recording: HandoffRecording | null;
+  /** Pair-bot failed to return these (not merely absent). */
+  transcript_error?: boolean;
+  recording_error?: boolean;
+}
+
+export interface HandoffRecording {
+  url: string;
+  expires_at?: string | null;
+}
+
+export interface HandoffResume {
+  interview_id: number;
+  candidate_name?: string | null;
+  resume_text?: string | null;
+}
+
+export interface HandoffState {
+  interview_id: number;
+  state: "requested" | "claimed" | "joined" | "closed" | "missed" | "cancelled" | null;
+  recruiter_email?: string;
+  expires_at?: string | null;
+  claimed_by_email?: string | null;
+  close_reason?: string | null;
+  is_your_handoff?: boolean | null;
+}
 
 export interface NotificationItem {
   id: number;

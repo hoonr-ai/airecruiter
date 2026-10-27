@@ -5,12 +5,18 @@
 export class ApiError extends Error {
   status: number;
   path: string;
+  // Parsed JSON response body, when the backend returned one — lets a
+  // catch site show the specific validation reason (e.g. the callback
+  // 5-minute-lead message) via extractErrorMessage instead of this error's
+  // own raw `${status} ${path}: ${rawBody}` message.
+  data?: unknown;
 
-  constructor(status: number, path: string, message?: string) {
+  constructor(status: number, path: string, message?: string, data?: unknown) {
     super(message || `${status} ${path}`);
     this.name = "ApiError";
     this.status = status;
     this.path = path;
+    this.data = data;
   }
 }
 

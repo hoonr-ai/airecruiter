@@ -221,6 +221,8 @@ import { nrMeasure } from "@/lib/newrelic";
 const IS_QA_ENV =
   typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";
 
+const IS_PROD_ENV = process.env.NEXT_PUBLIC_APP_ENV === "prod";
+
 // Contact validity, the launch email/phone getters and the streamed-phone
 // guard (betterPhoneUI) live in lib/launch-rules.ts, shared with the
 // server-side launch runner (services/launch_sessions/rules.py).
@@ -981,6 +983,14 @@ function NewJobPageContent() {
   const [sourceTitleInput, setSourceTitleInput] = useState("");
   const [sourceSkillInput, setSourceSkillInput] = useState("");
   const [sourceLocationInput, setSourceLocationInput] = useState("");
+  // Holds either a blocking validation error (bad zip shape/unknown zip —
+  // the location is NOT added) or a non-blocking "couldn't verify" notice
+  // (the lookup itself failed — the location IS still added). See
+  // addSourceLocation's own comment for why this exists.
+  const [sourceLocationError, setSourceLocationError] = useState("");
+  // Guards against a double-click, or Enter then a click, firing a second
+  // add while the first's zip lookup is still in flight (PR #859 review).
+  const [isAddingSourceLocation, setIsAddingSourceLocation] = useState(false);
   const [sourceLocationMiles, setSourceLocationMiles] = useState<number>(25);
   const sourceLocationMilesRef = useRef(sourceLocationMiles);
   useLayoutEffect(() => { sourceLocationMilesRef.current = sourceLocationMiles; }, [sourceLocationMiles]);
@@ -1033,6 +1043,10 @@ function NewJobPageContent() {
   // OFF, Launch PAIR behaves exactly like production (look up + launch for
   // everyone). Has no effect outside QA (gated by IS_QA_ENV).
   const [qaOverrideEnabled, setQaOverrideEnabled] = useState(true);
+  // Recruiter warm handoff: when ON, the PAIR bot asks you to join each
+  // candidate's call after its last question (you get a "Join now"
+  // notification). Off by default; sent with the launch.
+  const [recruiterHandoff, setRecruiterHandoff] = useState(false);
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
 
   // Source & Launch auto-selection guard rails. The launch is confirmation-
@@ -5506,32 +5520,72 @@ function NewJobPageContent() {
     });
   };
 
-  const addSourceLocation = (value: string) => {
+  const addSourceLocation = async (value: string) => {
     const cleanValue = value.trim();
-    if (!cleanValue) return;
-    excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));
-    const nextLocations = [
-      ...sourceLocations,
-      {
-        id: Date.now(),
-        value: cleanValue,
-        radius: `within ${sourceLocationMiles} mi`
+    if (!cleanValue || isAddingSourceLocation) return;
+    setIsAddingSourceLocation(true);
+    setSourceLocationError("");
+    try {
+      // A bare zip ("77002") or ZIP+4, with the +4 suffix joined by a
+      // dash, a space, or nothing at all ("77002-1234" == "77002 1234"
+      // == "770021234", matching the backend's own _parse_location) — no
+      // city name looks like this — is always meant as a zip. A wrong
+      // shape (2-3/6+ digits, a malformed ZIP+4) is rejected immediately,
+      // no round trip: the backend doesn't recognize these as a zip
+      // attempt at all (see
+      // test_parse_location_short_numeric_string_is_not_recognized_as_a_zip).
+      // A recognized shape extracts its 5-digit part for a real lookup,
+      // since the shape alone doesn't confirm it's assigned — messages
+      // below still show the user's own typed value, not just that
+      // extracted part, so "99999-1234" reads back as itself rather than
+      // the bare "99999" that was actually looked up.
+      let unverifiedWarning = "";
+      if (/^\d+([-\s]\d*)?$/.test(cleanValue)) {
+        const zip5 = cleanValue.match(/^(\d{5})(?:[-\s]?\d{4})?$/)?.[1];
+        if (!zip5) {
+          setSourceLocationError("Enter a 5-digit zip or ZIP+4 (e.g. 77002-1234)");
+          return;
+        }
+        try {
+          const res = await api.candidates.lookupZip(zip5);
+          if (!res?.valid) {
+            setSourceLocationError(`"${cleanValue}" isn't a recognized US zip code`);
+            return;
+          }
+        } catch {
+          // A network/5xx failure here shouldn't block adding the
+          // location, but failing open silently is the original bug from
+          // a different trigger — surface it instead of saying nothing.
+          unverifiedWarning = `Couldn't verify "${cleanValue}" — added anyway`;
+        }
       }
-    ];
-    setSourceLocations(nextLocations);
-    void saveJobDraft({
-      currentStep,
-      saveType: "auto",
-      skipToast: true,
-      sourceLocationsOverride: nextLocations,
-    }).catch(() => {});
-    setSourceLocationInput("");
-    setGeneratedBoolean("");
-    trackEvent("job_wizard_step5_source_location_added", {
-      step: 5,
-      value: truncateForTelemetry(cleanValue),
-      radius_miles: sourceLocationMiles,
-    });
+      excludedSourceLocationKeysRef.current.delete(normalizeLocationKey(cleanValue));
+      const nextLocations = [
+        ...sourceLocations,
+        {
+          id: Date.now(),
+          value: cleanValue,
+          radius: `within ${sourceLocationMiles} mi`
+        }
+      ];
+      setSourceLocations(nextLocations);
+      void saveJobDraft({
+        currentStep,
+        saveType: "auto",
+        skipToast: true,
+        sourceLocationsOverride: nextLocations,
+      }).catch(() => {});
+      setSourceLocationInput("");
+      setGeneratedBoolean("");
+      if (unverifiedWarning) setSourceLocationError(unverifiedWarning);
+      trackEvent("job_wizard_step5_source_location_added", {
+        step: 5,
+        value: truncateForTelemetry(cleanValue),
+        radius_miles: sourceLocationMiles,
+      });
+    } finally {
+      setIsAddingSourceLocation(false);
+    }
   };
 
   const addSourceCompany = (value: string) => {
@@ -6827,7 +6881,7 @@ function NewJobPageContent() {
   }, []);
 
   const serverLaunchOptions = () =>
-    buildLaunchOptions({ wizardMode, isRetry: false, jobBoardIds: selectedJobBoards, batchSize: LAUNCH_BATCH_SIZE });
+    buildLaunchOptions({ wizardMode, isRetry: false, jobBoardIds: selectedJobBoards, batchSize: LAUNCH_BATCH_SIZE, recruiterHandoff });
   const serverIdempotencyKey = () => newIdempotencyKey(typeof crypto !== "undefined" ? crypto : null);
   const goToRankings = () =>
     router.push(launchJobRef ? `/jobs/${encodeURIComponent(launchJobRef)}/rankings` : `/`);
@@ -8751,6 +8805,7 @@ function NewJobPageContent() {
             sendJobPostingEmail: selectedJobBoards.length > 0 && !options?.isRetry,
             appBaseUrl: typeof window !== "undefined" ? window.location.origin : "",
             batchSize: LAUNCH_BATCH_SIZE,
+            recruiterHandoff,
           },
           (evt) => {
             if (evt.type === "start") {
@@ -10177,11 +10232,14 @@ function NewJobPageContent() {
                       <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4.5 h-4.5 text-slate-300" />
                       <Input
                         value={sourceLocationInput}
-                        onChange={(e) => setSourceLocationInput(e.target.value)}
+                        onChange={(e) => {
+                          setSourceLocationInput(e.target.value);
+                          if (sourceLocationError) setSourceLocationError("");
+                        }}
                         onKeyDown={(e) => {
                           if (e.key === "Enter") {
                             e.preventDefault();
-                            addSourceLocation(sourceLocationInput);
+                            void addSourceLocation(sourceLocationInput);
                           }
                         }}
                         placeholder="City, state, or zip code..."
@@ -10228,14 +10286,19 @@ function NewJobPageContent() {
                     </div>
                     <Button
                       type="button"
-                      onClick={() => addSourceLocation(sourceLocationInput)}
-                      disabled={!sourceLocationInput.trim()}
+                      onClick={() => void addSourceLocation(sourceLocationInput)}
+                      disabled={!sourceLocationInput.trim() || isAddingSourceLocation}
                       className="h-11 px-4 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[13px] font-bold rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <Plus className="w-4 h-4 mr-1" />
                       Add
                     </Button>
                   </div>
+                  {sourceLocationError && (
+                    <p role="alert" className="text-[12px] font-medium text-rose-600 mt-1.5">
+                      {sourceLocationError}
+                    </p>
+                  )}
                 </div>
               </section>
 
@@ -11330,6 +11393,32 @@ function NewJobPageContent() {
                       </button>
                     )}
                   </div>
+                )}
+                {!IS_PROD_ENV && (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={recruiterHandoff}
+                  aria-label="Recruiter handoff"
+                  onClick={() => setRecruiterHandoff(v => !v)}
+                  disabled={isViewOnly || launchProgress.open}
+                  className="flex items-center gap-2 select-none disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={recruiterHandoff
+                    ? "Handoff ON - after the PAIR bot's last question you'll get a \"Join now\" notification to talk with the candidate live (skipped if they fail a hard filter, or outside working hours)"
+                    : "Handoff OFF - the PAIR bot closes each interview itself"}
+                >
+                  <span className="text-[12px] font-semibold text-slate-600">Recruiter handoff</span>
+                  <span
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${recruiterHandoff ? "bg-[#6366f1]" : "bg-slate-300"}`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${recruiterHandoff ? "translate-x-[18px]" : "translate-x-0.5"}`}
+                    />
+                  </span>
+                  <span className={`text-[11px] font-bold ${recruiterHandoff ? "text-[#6366f1]" : "text-slate-400"}`}>
+                    {recruiterHandoff ? "ON" : "OFF"}
+                  </span>
+                </button>
                 )}
                 {IS_QA_ENV && (
                   <div className="flex items-center gap-4">

@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { REJECTION_REASONS } from "@/lib/rejection";
+import { RejectionReasonSelect } from "@/components/RejectionReasonSelect";
 import {
   ArrowLeft,
   Search,
@@ -31,6 +31,8 @@ import {
   Ban,
   AlertTriangle,
   PhoneOff,
+  Clock,
+  CalendarCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -61,6 +63,8 @@ import { StopOutreachModal, type StopOutreachCandidate } from "@/components/Stop
 import { CrossSubmissionsPanel } from "@/components/CrossSubmissionsPanel";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import { API_BASE, authFetch, api } from "@/lib/api";
+import { ApiError, extractErrorMessage } from "@/lib/api-error";
+import { datetimeLocalMin, formatFixedDateTime, hasMinimumCallbackLeadTime } from "@/lib/callback-time";
 
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
@@ -528,9 +532,17 @@ export default function CandidateRankingsPage() {
   const [job, setJob] = useState<JobDetails | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [candidateTotalCount, setCandidateTotalCount] = useState(0);
+  // pagination.job_total — the "Matching N of total" denominator, constant
+  // across STATUS buckets, unlike the filter-scoped candidateTotalCount above.
+  const [candidateJobTotalCount, setCandidateJobTotalCount] = useState(0);
   const [candidateOffset, setCandidateOffset] = useState(0);
   const [hasMoreCandidates, setHasMoreCandidates] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  // True only while a STATUS-filter switch's fetch is in flight — distinct
+  // from isLoadingMore (infinite-scroll) and isLoading (the whole-job
+  // reload), neither of which cover this transition, so without this the
+  // header briefly reads "Matching 0 of 0" with no loading indicator.
+  const [isLoadingStatusFilter, setIsLoadingStatusFilter] = useState(false);
   const [launchedRowCount, setLaunchedRowCount] = useState(0);
   const [duplicateCount, setDuplicateCount] = useState(0);
   const [invalidContactCount, setInvalidContactCount] = useState(0);
@@ -545,9 +557,48 @@ export default function CandidateRankingsPage() {
   const [feedbackReasons, setFeedbackReasons] = useState<Record<string, string>>({});
   const [feedbackTimes, setFeedbackTimes] = useState<Record<string, string>>({});
   const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
-  const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
+  const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | 'callback' | null>(null);
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  // Forces a remount of ONE row's action Select after its modal is
+  // cancelled, so its own internal state resets — scoped to {candidateId,
+  // nonce} rather than a single counter bumped for every close (PR #840
+  // review: a shared counter remounted every row in the table on every
+  // close, however large).
+  const [actionSelectReset, setActionSelectReset] = useState<{ candidateId: number; nonce: number } | null>(null);
+  const [callbackAtInput, setCallbackAtInput] = useState("");
+  // Computed once, at the moment the modal opens (same as Candidates' own
+  // callbackAtMin) rather than inline in the input's `min` prop — calling
+  // the impure datetimeLocalMin()/Date.now() directly during render is a
+  // react-hooks/purity violation.
+  const [callbackAtMin, setCallbackAtMin] = useState("");
+  const callbackAtInputRef = useRef<HTMLInputElement>(null);
+  // Shown inline inside the Schedule Callback modal rather than only as a
+  // toast — the toast renders at a lower z-index than this modal's own
+  // backdrop, so while the modal stays open after a failed save the toast
+  // is effectively invisible behind it.
+  const [callbackModalError, setCallbackModalError] = useState("");
+  // PR #841 review: the callback modal had no focus handling at all — move
+  // focus onto its one input as soon as it opens, same as a native <dialog>
+  // would, instead of leaving focus wherever it was on the page behind it.
+  useEffect(() => {
+    if (integrationModalOpen === 'callback') {
+      callbackAtInputRef.current?.focus();
+    }
+  }, [integrationModalOpen]);
+  // Shared by every "cancel without choosing" path for the Submit/Reject
+  // modals (PR #840 review: this was copy-pasted at each call site). Reads
+  // actionCandidateId before clearing it so the remount above targets
+  // exactly the row whose modal just closed.
+  const closeIntegrationModal = useCallback(() => {
+    if (actionCandidateId != null) {
+      setActionSelectReset({ candidateId: actionCandidateId, nonce: Date.now() });
+    }
+    setIntegrationModalOpen(null);
+    setActionCandidateId(null);
+    setRejectReason("");
+    setCallbackAtInput("");
+  }, [actionCandidateId]);
 
   const handleConfirmSubmit = async (submissionData: SubmissionPayload) => {
     if (actionCandidateId) {
@@ -627,9 +678,86 @@ export default function CandidateRankingsPage() {
     }
   };
 
+  const handleMarkAllotmentSlotFilled = async (candidateId: string) => {
+    setSyncingCandidateId(Number(candidateId));
+    try {
+      await api.candidates.feedback(jobId as string, candidateId, { feedback_type: 'Allotment Slot Filled' });
+      setFeedbacks(prev => ({ ...prev, [candidateId]: 'Allotment Slot Filled' }));
+      setFeedbackTimes(prev => ({ ...prev, [candidateId]: new Date().toISOString() }));
+      setFeedbackReasons(prev => {
+        const next = { ...prev };
+        delete next[candidateId];
+        return next;
+      });
+    } catch (error) {
+      console.error('Error marking allotment slot filled:', error);
+      setToast({ message: "Failed to save allotment slot filled status", type: "error" });
+    } finally {
+      setSyncingCandidateId(null);
+    }
+  };
+
+  const handleConfirmCallbackSchedule = async () => {
+    if (!actionCandidateId || !callbackAtInput) return;
+    setCallbackModalError("");
+    // A browser's datetime-local `min` is only a hint, not enforcement
+    // (PR #845 review, mirrored here) — typed input can still submit a past
+    // time. Checks the backend's actual 5-minute lead, not just "in the
+    // future", so a time 10 seconds out is caught here instead of round-
+    // tripping to the backend for the same rejection.
+    if (!hasMinimumCallbackLeadTime(callbackAtInput)) {
+      setCallbackModalError("Callback time must be at least 5 minutes in the future");
+      return;
+    }
+    const candidateId = String(actionCandidateId);
+    // datetime-local has no timezone — treated as the browser's own local
+    // time, same as the moment it describes to the recruiter typing it in.
+    const callbackAtIso = new Date(callbackAtInput).toISOString();
+    setSyncingCandidateId(actionCandidateId);
+    try {
+      await api.candidates.feedback(jobId as string, candidateId, {
+        feedback_type: 'Callback Scheduled',
+        callback_at: callbackAtIso,
+      });
+      setFeedbacks(prev => ({ ...prev, [candidateId]: 'Callback Scheduled' }));
+      setFeedbackTimes(prev => ({ ...prev, [candidateId]: new Date().toISOString() }));
+      setFeedbackReasons(prev => ({ ...prev, [candidateId]: `Callback at ${formatFixedDateTime(callbackAtIso)}` }));
+      setToast({ message: "Callback scheduled — you'll get a reminder 5 minutes before", type: "success" });
+      // Only close/reset on success (PR #841 review) — closing unconditionally
+      // in `finally` meant a failed save also wiped callbackAtInput, forcing
+      // the recruiter to re-pick the time after an error.
+      setIntegrationModalOpen(null);
+      setActionCandidateId(null);
+      setCallbackAtInput("");
+    } catch (error) {
+      console.error('Error scheduling callback:', error);
+      // Shown inline in the still-open modal (not just a toast, which
+      // renders behind this modal's own overlay) so the recruiter actually
+      // sees why the save failed — e.g. the backend's 5-minute-lead rule —
+      // and can correct the time right there.
+      const message = error instanceof ApiError
+        ? extractErrorMessage(error.data, "Failed to schedule callback. Please try again.")
+        : "Failed to schedule callback. Please try again.";
+      setCallbackModalError(message);
+    } finally {
+      setSyncingCandidateId(null);
+    }
+  };
+
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
   type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a" | "duplicate_candidate" | "invalid_contact";
+  // STATUS buckets the backend can filter on (GET /jobs/{id}/candidates?status=),
+  // via engage_display_sql() — the same Pass/Fail/Pending/In Progress rule the
+  // header stat and launch report use. "n/a" / "duplicate_candidate" /
+  // "invalid_contact" are drop-reason/contact-based, not engage-status-based,
+  // and stay filtered client-side in filteredCandidates below.
+  const STATUS_FILTER_QUERY_VALUES: Partial<Record<StatusFilter, string>> = {
+    pass: "pass",
+    fail: "fail",
+    pending: "pending",
+    in_progress: "in_progress",
+  };
   type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status" | "engage_completed_at";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
@@ -821,12 +949,20 @@ export default function CandidateRankingsPage() {
         const hay = `${c.name || ""} ${c.email || ""} ${c.headline || ""} ${c.location || ""} ${c.work_location || ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
-      // Status
-      if (statusFilter !== "all") {
+      // Status — the four server-backed buckets (pass/fail/pending/in_progress)
+      // are already exactly what the backend returned for `status=`, computed
+      // from engage_display_sql() over the stored engage_status. Re-deriving
+      // a label here via normalizeInterviewStatus (which can lift a row to a
+      // further-along status using live pair-bot data the backend's filter
+      // never saw) and checking it against the same bucket again could
+      // disagree and silently drop a row the server already decided belonged
+      // in this filter. Only the remaining, non-engage-status buckets
+      // (n/a / duplicate_candidate / invalid_contact) still need this check —
+      // the backend doesn't filter on those.
+      if (statusFilter !== "all" && !STATUS_FILTER_QUERY_VALUES[statusFilter]) {
         const engageLabel = normalizeInterviewStatus(c).label.toLowerCase();
         let sf = statusFilter as string;
-        if (statusFilter === "in_progress") sf = "in progress";
-        else if (statusFilter === "duplicate_candidate") sf = "duplicate candidate";
+        if (statusFilter === "duplicate_candidate") sf = "duplicate candidate";
         else if (statusFilter === "invalid_contact") sf = "invalid contact";
 
         if (sf === "n/a") {
@@ -1636,6 +1772,10 @@ export default function CandidateRankingsPage() {
       limit: String(CANDIDATE_PAGE_SIZE),
       offset: String(offset),
     });
+    const statusQueryValue = STATUS_FILTER_QUERY_VALUES[statusFilter];
+    if (statusQueryValue) {
+      query.set("status", statusQueryValue);
+    }
     const candData = await api.jobs.getCandidates(jobId as string, query.toString());
     if (activeJobIdRef.current !== jobId || isStale?.()) return;
 
@@ -1677,6 +1817,10 @@ export default function CandidateRankingsPage() {
     if (Number.isFinite(total)) {
       setCandidateTotalCount(total);
     }
+    const jobTotal = Number(candData?.pagination?.job_total);
+    if (Number.isFinite(jobTotal)) {
+      setCandidateJobTotalCount(jobTotal);
+    }
 
     setHasMoreCandidates(Boolean(candData?.pagination?.has_more));
     setCandidateOffset(offset + pageRows.length);
@@ -1699,13 +1843,51 @@ export default function CandidateRankingsPage() {
       }
       return prev;
     });
-  }, [CANDIDATE_PAGE_SIZE, jobId, normalizeCandidateRows]);
+  }, [CANDIDATE_PAGE_SIZE, jobId, normalizeCandidateRows, statusFilter]);
+
+  // A backend-filtered STATUS bucket (pass/fail/pending/in_progress) only
+  // covers whatever page fetchCandidatesPage sent it with — switching the
+  // dropdown has to reload from offset 0 with the new value, not keep
+  // filtering client-side over rows fetched under the previous filter (or
+  // under none). Skipped on mount: the [jobId] effect above already loads
+  // the initial "all" page.
+  const statusFilterMountRef = useRef(statusFilter);
+  useEffect(() => {
+    if (statusFilterMountRef.current === statusFilter) return;
+    statusFilterMountRef.current = statusFilter;
+    if (!jobId) return;
+    // Bump the same generation counter fetchData uses: an in-flight
+    // loadMoreCandidates started under the previous filter (e.g. the user
+    // flips STATUS mid-scroll) must not land after this reset — it would
+    // append rows fetched under the old filter onto the new filter's result,
+    // and candidateOffset would advance from the wrong base.
+    const seq = ++loadSeqRef.current;
+    const isStale = () => seq !== loadSeqRef.current;
+    setCandidates([]);
+    setCandidateOffset(0);
+    setHasMoreCandidates(false);
+    setIsLoadingStatusFilter(true);
+    fetchCandidatesPage(0, true, isStale)
+      .catch((error) => console.error("Error reloading candidates for STATUS filter:", error))
+      .finally(() => {
+        // Only this call's own completion clears the flag — a stale response
+        // from a filter the user has since switched away from must not flip
+        // it off while a newer fetch (which set it true itself) is still going.
+        if (!isStale()) setIsLoadingStatusFilter(false);
+      });
+  }, [statusFilter, jobId, fetchCandidatesPage]);
 
   const loadMoreCandidates = useCallback(async () => {
     if (!jobId || isLoading || isLoadingMore || !hasMoreCandidates) return;
     setIsLoadingMore(true);
+    // Snapshot the generation this load started under — if a job switch or a
+    // STATUS filter change bumps loadSeqRef while this request is in flight,
+    // isStale() tells fetchCandidatesPage to drop the response instead of
+    // appending rows fetched under a filter that no longer applies.
+    const seq = loadSeqRef.current;
+    const isStale = () => seq !== loadSeqRef.current;
     try {
-      await fetchCandidatesPage(candidateOffset, false);
+      await fetchCandidatesPage(candidateOffset, false, isStale);
     } catch (error) {
       console.error("Error loading next candidate page:", error);
     } finally {
@@ -1729,6 +1911,12 @@ export default function CandidateRankingsPage() {
     setFeedbacks({});
     setFeedbackReasons({});
     setCandidateTotalCount(0);
+    setCandidateJobTotalCount(0);
+    // A job switch bumps loadSeqRef, so an in-flight STATUS-filter-switch
+    // fetch (started under the old job) finds isStale() true when it
+    // resolves and skips its own setIsLoadingStatusFilter(false) — reset it
+    // here instead, or "(Loading…)" would be stuck on for the new job.
+    setIsLoadingStatusFilter(false);
     setLaunchedRowCount(0);
     setDuplicateCount(0);
     setInvalidContactCount(0);
@@ -1886,6 +2074,9 @@ export default function CandidateRankingsPage() {
   const totalCandidates = candidateTotalCount || candidates.length;
   const isPartiallyLoaded = hasMoreCandidates || candidateOffset < totalCandidates;
   const displayedCount = hasActiveFilters ? filteredCandidates.length : candidates.length;
+  // > 0, not ||, so a job with genuinely 0 candidates still shows 0 instead
+  // of falling through to the filter-scoped totalCandidates.
+  const displayTotalCandidates = candidateJobTotalCount > 0 ? candidateJobTotalCount : totalCandidates;
 
   return (
     <div className="max-w-[1600px] mx-auto px-2 space-y-4 pb-10">
@@ -2332,9 +2523,9 @@ export default function CandidateRankingsPage() {
               {(totalCandidates > 0 || hasActiveFilters) && (
                 <span className="text-[13px] font-medium text-slate-500 whitespace-nowrap">
                   {hasActiveFilters ? "Matching" : "Showing"} <span className="text-slate-900 font-semibold">{hasActiveFilters ? displayedCount : totalCandidates}</span>
-                  {hasActiveFilters && <> of <span className="text-slate-900 font-semibold">{totalCandidates}</span></>}
+                  {hasActiveFilters && <> of <span className="text-slate-900 font-semibold">{displayTotalCandidates}</span></>}
                   {" "}total candidates
-                  {isPartiallyLoaded && <span className="ml-1 text-[11px] text-slate-400">(Loading…)</span>}
+                  {(isPartiallyLoaded || isLoadingStatusFilter) && <span className="ml-1 text-[11px] text-slate-400">(Loading…)</span>}
                 </span>
               )}
             </div>
@@ -2988,6 +3179,7 @@ export default function CandidateRankingsPage() {
                         <TableCell className="border-b border-slate-200 text-center pr-4 pl-4 border-l border-slate-200 py-4 align-middle transition-colors group-hover:bg-indigo-50/5">
                           <div className="flex flex-col items-center gap-1.5">
                             <Select
+                              key={actionSelectReset?.candidateId === candidate.id ? `${candidate.id}-${actionSelectReset.nonce}` : candidate.id}
                               disabled={syncingCandidateId === candidate.id}
                               value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || undefined}
                               onValueChange={(val) => {
@@ -3000,6 +3192,14 @@ export default function CandidateRankingsPage() {
                                   setIntegrationModalOpen('submit');
                                 } else if (val === "Unreachable") {
                                   handleMarkUnreachable(String(candidate.id));
+                                } else if (val === "Allotment Slot Filled") {
+                                  handleMarkAllotmentSlotFilled(String(candidate.id));
+                                } else if (val === "Callback Scheduled") {
+                                  setActionCandidateId(candidate.id);
+                                  setCallbackAtInput("");
+                                  setCallbackAtMin(datetimeLocalMin());
+                                  setCallbackModalError("");
+                                  setIntegrationModalOpen('callback');
                                 }
                               }}
                             >
@@ -3010,14 +3210,22 @@ export default function CandidateRankingsPage() {
                                 <SelectItem value="Submit" className="text-[12px] font-semibold cursor-pointer">Submit</SelectItem>
                                 <SelectItem value="Reject" className="text-[12px] font-semibold cursor-pointer">Reject</SelectItem>
                                 <SelectItem value="Unreachable" className="text-[12px] font-semibold cursor-pointer">Unreachable</SelectItem>
+                                <SelectItem value="Allotment Slot Filled" className="text-[12px] font-semibold cursor-pointer">Allotment Slot Filled</SelectItem>
+                                <SelectItem value="Callback Scheduled" className="text-[12px] font-semibold cursor-pointer">Callback Scheduled</SelectItem>
                               </SelectContent>
                             </Select>
                             {feedbacks[candidate.id] && (
                               <div className="flex flex-col items-center gap-1 mt-1.5">
-                                <div className={`text-xs font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : feedbacks[candidate.id] === 'Reject' ? 'text-rose-600' : 'text-slate-500'}`}>
-                                  {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : 
-                                   feedbacks[candidate.id] === 'Reject' ? <><X className="w-3 h-3" /> Rejected</> : 
-                                   <><PhoneOff className="w-3 h-3" /> Unreachable</>}
+                                <div className={`text-xs font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : feedbacks[candidate.id] === 'Reject' ? 'text-rose-600' : feedbacks[candidate.id] === 'Allotment Slot Filled' ? 'text-amber-600' : feedbacks[candidate.id] === 'Callback Scheduled' ? 'text-sky-600' : 'text-slate-500'}`}>
+                                  {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> :
+                                   feedbacks[candidate.id] === 'Reject' ? <><X className="w-3 h-3" /> Rejected</> :
+                                   feedbacks[candidate.id] === 'Allotment Slot Filled' ? <><CalendarCheck className="w-3 h-3" /> Slot Filled</> :
+                                   feedbacks[candidate.id] === 'Callback Scheduled' ? <><Clock className="w-3 h-3" /> Callback Scheduled</> :
+                                   feedbacks[candidate.id] === 'Unreachable' ? <><PhoneOff className="w-3 h-3" /> Unreachable</> :
+                                   /* PR #841 review: an explicit fallback for any future status this
+                                      badge doesn't know about yet, instead of silently mislabeling it
+                                      "Unreachable". */
+                                   <>{feedbacks[candidate.id]}</>}
                                 </div>
                                 {feedbackReasons[candidate.id] && (
                                   <div className="max-w-[160px] max-h-[80px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 pr-1 text-xs text-slate-600 font-medium text-center leading-snug whitespace-normal break-words">
@@ -3182,10 +3390,7 @@ export default function CandidateRankingsPage() {
       {/* Integration Modals */}
       <SubmissionModal
         isOpen={integrationModalOpen === 'submit' && !!actionCandidateId}
-        onClose={() => {
-          setIntegrationModalOpen(null);
-          setActionCandidateId(null);
-        }}
+        onClose={closeIntegrationModal}
         candidateName={candidates.find(c => c.id === actionCandidateId)?.name}
         jobTitle={job?.title || "Job"}
         jobRef={job?.jobdiva_id || job?.job_id || String(jobId || "")}
@@ -3202,7 +3407,7 @@ export default function CandidateRankingsPage() {
                     <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
                     Reject Candidate
                   </h3>
-                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                  <button onClick={closeIntegrationModal} className="text-slate-400 hover:text-slate-600">×</button>
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
@@ -3210,22 +3415,15 @@ export default function CandidateRankingsPage() {
                   </p>
                   <div className="space-y-2">
                     <label htmlFor={`reject-reason-${actionCandidateId || "rankings"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
-                    <select
+                    <RejectionReasonSelect
                       id={`reject-reason-${actionCandidateId || "rankings"}`}
-                      aria-label="Rejection Reason"
-                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
                       value={rejectReason}
-                      onChange={e => setRejectReason(e.target.value)}
-                    >
-                      <option value="" disabled>Select a reason...</option>
-                      {REJECTION_REASONS.map((r) => (
-                        <option key={r} value={r}>{r}</option>
-                      ))}
-                    </select>
+                      onChange={setRejectReason}
+                    />
                   </div>
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button variant="outline" onClick={closeIntegrationModal} className="font-semibold text-slate-600">Cancel</Button>
                   <Button
                     variant="destructive"
                     onClick={handleConfirmReject}
@@ -3238,8 +3436,75 @@ export default function CandidateRankingsPage() {
           </div>
         </div>
       )}
+      {integrationModalOpen === 'callback' && actionCandidateId && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="callback-modal-title"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.stopPropagation();
+              setIntegrationModalOpen(null);
+              setCallbackAtInput("");
+              setCallbackModalError("");
+            }
+          }}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
+                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                  <h3 id="callback-modal-title" className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-sky-100 text-sky-600 flex items-center justify-center">
+                      <Clock className="w-3 h-3" />
+                    </span>
+                    Schedule Callback
+                  </h3>
+                  <button
+                    onClick={() => { setIntegrationModalOpen(null); setCallbackAtInput(""); setCallbackModalError(""); }}
+                    aria-label="Close"
+                    className="text-slate-400 hover:text-slate-600"
+                  >×</button>
+                </div>
+                <div className="p-6 space-y-4">
+                  <p className="text-sm text-slate-500">
+                    When do you plan to call <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong> back? You'll get a reminder 5 minutes before.
+                  </p>
+                  <div className="space-y-2">
+                    <label htmlFor={`callback-at-${actionCandidateId || "rankings"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Callback Time</label>
+                    <input
+                      ref={callbackAtInputRef}
+                      id={`callback-at-${actionCandidateId || "rankings"}`}
+                      type="datetime-local"
+                      aria-label="Callback Time"
+                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500/50"
+                      value={callbackAtInput}
+                      min={callbackAtMin}
+                      onChange={e => { setCallbackAtInput(e.target.value); setCallbackModalError(""); }}
+                    />
+                    {callbackModalError && (
+                      <p role="alert" className="text-sm font-medium text-rose-600">{callbackModalError}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                  <Button variant="outline" onClick={() => { setIntegrationModalOpen(null); setCallbackAtInput(""); setCallbackModalError(""); }} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button
+                    onClick={handleConfirmCallbackSchedule}
+                    disabled={!callbackAtInput || syncingCandidateId === actionCandidateId}
+                    className="font-bold bg-sky-600 hover:bg-sky-700 text-white"
+                  >
+                    {syncingCandidateId === actionCandidateId ? 'Saving...' : 'Schedule Callback'}
+                  </Button>
+                </div>
+          </div>
+        </div>
+      )}
       {toast && (
-        <div className="fixed right-4 top-4 z-[90]">
+        // z-[110]: above every modal overlay on this page (the highest of
+        // which is z-[100]) — previously z-[90], so a toast fired while a
+        // modal stayed open (e.g. a failed save) rendered behind the
+        // modal's backdrop and was effectively invisible.
+        <div className="fixed right-4 top-4 z-[110]">
           <div
             className={`rounded-lg border px-3 py-2 text-[12px] font-semibold shadow-md transition-all ${toast.type === "success"
               ? "border-emerald-200 bg-emerald-50 text-emerald-700"

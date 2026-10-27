@@ -1,0 +1,422 @@
+"""Coverage for the Upcoming Callbacks list and its "mark done" action:
+
+- GET /candidates/callbacks/upcoming: scoped to the requesting recruiter
+  (same scoping as the reminder notification itself), excludes callbacks
+  already marked done, soonest-first.
+- POST .../callback/done: a lightweight write (callback_done_at only) that
+  never touches feedback_type, JobDiva, or any notification — the callback
+  isn't an outcome by itself, so this deliberately doesn't ask the recruiter
+  to pick Submit/Reject/Unreachable the way Rankings does.
+"""
+import json
+
+import pytest
+from fastapi import HTTPException
+
+from core.auth import UserIdentity
+
+
+class _FakeCursor:
+    def __init__(self, fetchone_results=None, fetchall_results=None):
+        self.executed = []
+        self._fetchone_results = list(fetchone_results or [])
+        self._fetchall_results = list(fetchall_results or [])
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+
+    def fetchone(self):
+        return self._fetchone_results.pop(0) if self._fetchone_results else None
+
+    def fetchall(self):
+        return self._fetchall_results.pop(0) if self._fetchall_results else []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.committed = False
+        self.closed = False
+
+    def cursor(self, cursor_factory=None):
+        return self._cursor
+
+    def commit(self):
+        self.committed = True
+
+    def close(self):
+        self.closed = True
+
+
+def _setup(monkeypatch):
+    from routers import candidates as cand_module
+    monkeypatch.setattr(cand_module, "_verify_job_access_by_id", lambda *a, **kw: None)
+    return cand_module
+
+
+# --- POST /jobs/{job}/candidates/{id}/callback/done -------------------------
+
+def _resolved_row(submitted_by="recruiter@pyramidci.com", feedback_type="Callback Scheduled", sc_id=55148489):
+    return (sc_id, {"feedback_type": feedback_type, "submitted_by": submitted_by})
+
+
+@pytest.mark.anyio
+async def test_mark_callback_done_sets_callback_done_at_only(monkeypatch):
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[_resolved_row()])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    res = await cand_module.mark_candidate_callback_done(
+        job_id_or_ref="26-12137", candidate_id="55148489", user=user,
+    )
+
+    assert res == {"status": "success"}
+    update_calls = [c for c in cur.executed if "UPDATE sourced_candidates" in c[0]]
+    assert len(update_calls) == 1
+    sql, params = update_calls[0]
+    payload = json.loads(params[0])
+    # Only callback_done_at — no feedback_type, no JobDiva action string,
+    # nothing that would read as an actual outcome on Rankings.
+    assert set(payload.keys()) == {"callback_done_at"}
+    assert params[1] == 55148489
+    # The UPDATE itself is scoped to feedback_type — an atomic guarantee,
+    # not just a Python check before it, so a race with a concurrent
+    # Reject/Submit can't stamp callback_done_at onto a row that's no
+    # longer a pending callback. LOWER(TRIM(...)), matching
+    # list_upcoming_callbacks' own filter (PR review: an exact-string match
+    # here could silently no-op on a row the list still shows, for any
+    # differently-cased or whitespace-padded value).
+    assert "lower(trim(data->>'feedback_type')) = 'callback scheduled'" in sql.lower()
+    # PR #851 review: the duplicate-row ordering fix in
+    # notifications_service._fetch_job_and_candidate relies on updated_at
+    # actually reflecting this write — there's no trigger bumping it
+    # automatically, so it must be set here explicitly.
+    assert "updated_at = now()" in sql.lower()
+    assert conn.committed is True
+
+
+@pytest.mark.anyio
+async def test_mark_callback_done_404s_when_candidate_not_resolved(monkeypatch):
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[None])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.mark_candidate_callback_done(
+            job_id_or_ref="26-12137", candidate_id="999999", user=user,
+        )
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_mark_callback_done_404s_when_row_id_belongs_to_a_different_job(monkeypatch):
+    """PR #855 review (High, IDOR): a row_id pin is still scoped to
+    job_id_or_ref — a recruiter with access to job 26-12137 can't pass a
+    row_id belonging to the same candidate_id's row on a DIFFERENT job they
+    have no access to and clear its callback. The fake cursor returns no row
+    for the pinned query (standing in for the job-scoped WHERE clause finding
+    nothing), so this must 404 rather than fall through to the ambiguous
+    candidate_id/jobdiva_id match below it."""
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[None])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.mark_candidate_callback_done(
+            job_id_or_ref="26-12137", candidate_id="55148489", row_id=99999001, user=user,
+        )
+    assert exc_info.value.status_code == 404
+
+    # Exactly one query ran (the row_id-pinned branch) — no fall-through to
+    # the ambiguous candidate_id/jobdiva_id query, and no UPDATE at all.
+    assert len(cur.executed) == 1
+    sql, params = cur.executed[0]
+    assert "sc.id = %s" in sql and "mj.job_id = %s" in sql
+    assert params[0] == 99999001
+    assert "26-12137" in params
+    assert not any("UPDATE sourced_candidates" in c[0] for c in cur.executed)
+
+
+@pytest.mark.anyio
+async def test_cancel_callback_404s_when_row_id_belongs_to_a_different_job(monkeypatch):
+    """Same IDOR scoping as mark_callback_done, for /callback/cancel's own
+    row_id-pinned resolution."""
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[None])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.cancel_candidate_callback(
+            job_id_or_ref="26-12137", candidate_id="55148489", row_id=99999001, user=user,
+        )
+    assert exc_info.value.status_code == 404
+    assert len(cur.executed) == 1
+    assert not any("UPDATE sourced_candidates" in c[0] for c in cur.executed)
+
+
+@pytest.mark.anyio
+async def test_mark_callback_done_403s_for_a_different_recruiter(monkeypatch):
+    """PR #844 review (Medium): list_upcoming_callbacks scopes to
+    submitted_by == user.email, so clearing a callback must be scoped the
+    same way — another non-admin recruiter with job access shouldn't be
+    able to clear a callback off someone else's list."""
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[_resolved_row(submitted_by="owner@pyramidci.com")])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="someone-else@pyramidci.com", role="recruiter")
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.mark_candidate_callback_done(
+            job_id_or_ref="26-12137", candidate_id="55148489", user=user,
+        )
+    assert exc_info.value.status_code == 403
+    assert not any("UPDATE sourced_candidates" in c[0] for c in cur.executed)
+
+
+@pytest.mark.anyio
+async def test_mark_callback_done_allows_an_admin_regardless_of_owner(monkeypatch):
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[_resolved_row(submitted_by="owner@pyramidci.com")])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="admin@pyramidci.com", role="admin")
+    res = await cand_module.mark_candidate_callback_done(
+        job_id_or_ref="26-12137", candidate_id="55148489", user=user,
+    )
+    assert res == {"status": "success"}
+    assert any("UPDATE sourced_candidates" in c[0] for c in cur.executed)
+
+
+# --- POST /jobs/{job}/candidates/{id}/callback/cancel -----------------------
+
+@pytest.mark.anyio
+async def test_cancel_callback_clears_feedback_type_and_both_timestamps(monkeypatch):
+    """Unlike /callback/done (callback_done_at only), /callback/cancel must
+    clear feedback_type too — a cancelled callback is "never happened", not
+    "Callback Scheduled with nothing scheduled"."""
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[_resolved_row()])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    res = await cand_module.cancel_candidate_callback(
+        job_id_or_ref="26-12137", candidate_id="55148489", user=user,
+    )
+
+    assert res == {"status": "success"}
+    update_calls = [c for c in cur.executed if "UPDATE sourced_candidates" in c[0]]
+    assert len(update_calls) == 1
+    sql, params = update_calls[0]
+    payload = json.loads(params[0])
+    assert payload == {"feedback_type": None, "callback_scheduled_at": None, "callback_done_at": None}
+    assert params[1] == 55148489
+    # Scoped at the SQL level to a still-pending "Callback Scheduled" row,
+    # same guarantee (and same LOWER(TRIM(...)) match) /callback/done relies on.
+    assert "lower(trim(data->>'feedback_type')) = 'callback scheduled'" in sql.lower()
+    # PR #851 review: the duplicate-row ordering fix in
+    # notifications_service._fetch_job_and_candidate relies on updated_at
+    # actually reflecting this write — there's no trigger bumping it
+    # automatically, so it must be set here explicitly.
+    assert "updated_at = now()" in sql.lower()
+    assert conn.committed is True
+
+
+@pytest.mark.anyio
+async def test_cancel_callback_404s_when_candidate_not_resolved(monkeypatch):
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[None])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.cancel_candidate_callback(
+            job_id_or_ref="26-12137", candidate_id="999999", user=user,
+        )
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_cancel_callback_403s_for_a_different_recruiter(monkeypatch):
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[_resolved_row(submitted_by="owner@pyramidci.com")])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="someone-else@pyramidci.com", role="recruiter")
+    with pytest.raises(HTTPException) as exc_info:
+        await cand_module.cancel_candidate_callback(
+            job_id_or_ref="26-12137", candidate_id="55148489", user=user,
+        )
+    assert exc_info.value.status_code == 403
+    assert not any("UPDATE sourced_candidates" in c[0] for c in cur.executed)
+
+
+@pytest.mark.anyio
+async def test_cancel_callback_allows_an_admin_regardless_of_owner(monkeypatch):
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchone_results=[_resolved_row(submitted_by="owner@pyramidci.com")])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="admin@pyramidci.com", role="admin")
+    res = await cand_module.cancel_candidate_callback(
+        job_id_or_ref="26-12137", candidate_id="55148489", user=user,
+    )
+    assert res == {"status": "success"}
+    assert any("UPDATE sourced_candidates" in c[0] for c in cur.executed)
+
+
+# --- GET /candidates/callbacks/upcoming -------------------------------------
+
+def _row(**overrides):
+    row = {
+        "id": 42,
+        "candidate_id": "c1", "name": "Jane Doe",
+        "data": {
+            "feedback_type": "Callback Scheduled",
+            "callback_scheduled_at": "2026-01-01T15:00:00+00:00",
+            "submitted_by": "recruiter@pyramidci.com",
+        },
+        "job_id": "J1", "jobdiva_id": "26-1", "title": "Data Engineer",
+        "enhanced_title": None, "customer_name": "Acme",
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.anyio
+async def test_list_upcoming_callbacks_returns_scoped_rows(monkeypatch):
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchall_results=[[_row()]])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    res = await cand_module.list_upcoming_callbacks(user=user)
+
+    assert res["status"] == "success"
+    assert len(res["callbacks"]) == 1
+    cb = res["callbacks"][0]
+    # row_id (sourced_candidates.id) — PR review: candidate_id + job_id alone
+    # aren't unique for a multi-sourced candidate's duplicate rows, which
+    # previously gave every duplicate in this list the identical frontend
+    # key and no way to target one specific row for Reschedule/Mark Done/
+    # Cancel.
+    assert cb["row_id"] == 42
+    assert cb["candidate_id"] == "c1"
+    assert cb["candidate_name"] == "Jane Doe"
+    assert cb["job_title"] == "Data Engineer"
+    assert cb["customer_name"] == "Acme"
+    assert cb["callback_at"] == "2026-01-01T15:00:00+00:00"
+    assert cb["jobdiva_id"] == "26-1"
+    # Absent from _row()'s default data — a row written before this field
+    # shipped must read as "a fresh schedule", not crash the list.
+    assert cb["is_reschedule"] is False
+
+    sql, params = cur.executed[0]
+    assert "callback_done_at' IS NULL" in sql
+    assert "LOWER(TRIM(sc.data->>'submitted_by')) = %s" in sql
+    assert params == ("recruiter@pyramidci.com",)
+
+
+@pytest.mark.anyio
+async def test_list_upcoming_callbacks_falls_back_to_the_plain_title(monkeypatch):
+    cand_module = _setup(monkeypatch)
+    cur = _FakeCursor(fetchall_results=[[_row(title="Data Engineer", enhanced_title="Senior Data Engineer")]])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    res = await cand_module.list_upcoming_callbacks(user=user)
+    assert res["callbacks"][0]["job_title"] == "Senior Data Engineer"
+
+
+@pytest.mark.anyio
+async def test_list_upcoming_callbacks_skips_a_row_with_no_callback_at(monkeypatch):
+    """Defensive: the SQL filters on feedback_type/submitted_by/done, not on
+    callback_scheduled_at's shape — a row that somehow lacks it must not
+    surface with a None time."""
+    cand_module = _setup(monkeypatch)
+    bad_row = _row(data={"feedback_type": "Callback Scheduled", "submitted_by": "recruiter@pyramidci.com"})
+    cur = _FakeCursor(fetchall_results=[[bad_row]])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    res = await cand_module.list_upcoming_callbacks(user=user)
+    assert res["callbacks"] == []
+
+
+@pytest.mark.anyio
+async def test_list_upcoming_callbacks_includes_callback_done_at(monkeypatch):
+    """PR review follow-up: Mark Done 'erasing' a row on refresh — the
+    response must carry callback_done_at so the frontend can show the
+    'Marked as done' state from server data, not only its own in-memory
+    optimistic update that a refresh would lose."""
+    cand_module = _setup(monkeypatch)
+    done_row = _row(data={
+        "feedback_type": "Callback Scheduled",
+        "callback_scheduled_at": "2026-01-01T15:00:00+00:00",
+        "callback_done_at": "2026-01-01T15:05:00+00:00",
+        "submitted_by": "recruiter@pyramidci.com",
+    })
+    cur = _FakeCursor(fetchall_results=[[done_row]])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    res = await cand_module.list_upcoming_callbacks(user=user)
+    assert res["callbacks"][0]["callback_done_at"] == "2026-01-01T15:05:00+00:00"
+
+
+@pytest.mark.anyio
+async def test_list_upcoming_callbacks_surfaces_is_reschedule(monkeypatch):
+    """save_candidate_feedback's own callback_is_reschedule (see its
+    comment) passes straight through so the UI can show a Reschedule
+    differently from a fresh Schedule."""
+    cand_module = _setup(monkeypatch)
+    rescheduled_row = _row(data={
+        "feedback_type": "Callback Scheduled",
+        "callback_scheduled_at": "2026-01-01T15:00:00+00:00",
+        "submitted_by": "recruiter@pyramidci.com",
+        "callback_is_reschedule": True,
+    })
+    cur = _FakeCursor(fetchall_results=[[rescheduled_row]])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(cand_module, "get_db_connection", lambda: conn)
+
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    res = await cand_module.list_upcoming_callbacks(user=user)
+    assert res["callbacks"][0]["is_reschedule"] is True
+
+
+@pytest.mark.anyio
+async def test_list_upcoming_callbacks_noop_without_a_recipient_email(monkeypatch):
+    cand_module = _setup(monkeypatch)
+
+    def _fail():
+        raise AssertionError("must not touch the DB without a recipient email")
+
+    monkeypatch.setattr(cand_module, "get_db_connection", _fail)
+
+    user = UserIdentity(email="", role="recruiter")
+    res = await cand_module.list_upcoming_callbacks(user=user)
+    assert res == {"status": "success", "callbacks": []}

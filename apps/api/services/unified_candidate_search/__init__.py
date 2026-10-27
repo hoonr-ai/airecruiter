@@ -1,0 +1,68 @@
+"""Unified candidate search package.
+
+Re-exports the public surface of the former ``services/unified_candidate_search.py``
+module so existing importers keep working.
+"""
+from .common import (
+    DISABLED_EXTERNAL_SOURCES,
+    LINKEDIN_UNIPILE_SEARCH_ENABLED,
+    LocationEntry,
+    SearchCriteria,
+    _MATRIX_BAND_LINES,
+    _MAX_LOCATIONS,
+    _TITLE_BOOST_BY_RELEVANCE,
+    _TITLE_GATE_STOPWORDS,
+    _TITLE_GATE_WORD_RE,
+    _TITLE_SEPARATORS,
+    _UNKNOWN_DISTANCE_SENTINEL,
+    _UNSET_FAMILY,
+    _below_contact_score_floor,
+    _broad_core_radius_distance,
+    _candidate_titles,
+    _compute_title_boost,
+    _is_excluded_criterion,
+    _off_search_family,
+    _paid_contact_deferred,
+    _richer_profile_location,
+    _search_job_id,
+    _title_gate_normalize,
+    _traced,
+    logger,
+    resolve_jobdiva_sources,
+    title_relevance_gate,
+)
+from .service import (
+    UnifiedCandidateSearch,
+    unified_search_service,
+)
+
+__all__ = [
+    "DISABLED_EXTERNAL_SOURCES",
+    "LINKEDIN_UNIPILE_SEARCH_ENABLED",
+    "LocationEntry",
+    "SearchCriteria",
+    "UnifiedCandidateSearch",
+    "_MATRIX_BAND_LINES",
+    "_MAX_LOCATIONS",
+    "_TITLE_BOOST_BY_RELEVANCE",
+    "_TITLE_GATE_STOPWORDS",
+    "_TITLE_GATE_WORD_RE",
+    "_TITLE_SEPARATORS",
+    "_UNKNOWN_DISTANCE_SENTINEL",
+    "_UNSET_FAMILY",
+    "_below_contact_score_floor",
+    "_broad_core_radius_distance",
+    "_candidate_titles",
+    "_compute_title_boost",
+    "_is_excluded_criterion",
+    "_off_search_family",
+    "_paid_contact_deferred",
+    "_richer_profile_location",
+    "_search_job_id",
+    "_title_gate_normalize",
+    "_traced",
+    "logger",
+    "resolve_jobdiva_sources",
+    "title_relevance_gate",
+    "unified_search_service",
+]

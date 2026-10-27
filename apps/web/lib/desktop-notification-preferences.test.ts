@@ -40,6 +40,14 @@ const BACKEND_TYPES_SNAPSHOT = [
   "daily_digest",
   "candidate_internal_review_requested",
   "candidate_externally_submitted",
+  // apps/api/services/recruiter_handoff.py (NOTIFY_REQUESTED / NOTIFY_MISSED)
+  "recruiter_handoff_requested",
+  "recruiter_handoff_missed",
+  // apps/api/services/notifications_service.py's
+  // create_candidate_callback_reminder_notification — fires ~5 minutes
+  // before a recruiter's own scheduled callback time (routers/candidates.py's
+  // 'Callback Scheduled' feedback_type).
+  "candidate_callback_reminder",
 ];
 
 describe("DESKTOP_NOTIFICATION_TYPES", () => {

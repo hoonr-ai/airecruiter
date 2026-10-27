@@ -353,6 +353,13 @@ def _get_job_draft_sync(job_id: str) -> dict:
     }
 
 
+def verify_job_access_by_id(job_id: str, user: UserIdentity, allow_not_found: bool = False, check_duplicate_launch: bool = False) -> None:
+    """Public name for `_verify_job_access_by_id`, for callers outside the
+    routers package helpers (looked up at call time, so tests that patch the
+    private name still apply)."""
+    return _verify_job_access_by_id(job_id, user, allow_not_found=allow_not_found, check_duplicate_launch=check_duplicate_launch)
+
+
 def _verify_job_access_by_id(job_id: str, user: UserIdentity, allow_not_found: bool = False, check_duplicate_launch: bool = False) -> None:
     if user.is_admin:
         return

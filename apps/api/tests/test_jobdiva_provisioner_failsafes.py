@@ -22,6 +22,7 @@ from typing import Any, Dict, List
 import pytest
 
 import routers.engagement as eng
+from routers.engagement import common as eng_common, provisioning as eng_provisioning  # noqa: E402
 from services.jobdiva import JOBDIVA_PROFILE_INVARIANT, JobDivaApplicationOutcome
 
 OWN = "462058065251"
@@ -110,12 +111,12 @@ def harness(monkeypatch):
             reread_calls.append(str(row.get("candidate_id")))
             return dict(reread or {})
 
-        monkeypatch.setattr(eng, "_fetch_linkedin_profile_for_resume", _linkedin_reread)
-        monkeypatch.setattr(eng, "get_db_connection", lambda: _Conn(rows))
-        monkeypatch.setattr(eng, "_resolve_provisioning_job_ids", _job_ids)
-        monkeypatch.setattr(eng, "jobdiva_service", fake)
-        monkeypatch.setattr(eng, "_utc_now_iso", lambda: NOW)
-        monkeypatch.setattr(eng, "_persist_jobdiva_link_state", _record_link_state)
+        monkeypatch.setattr(eng_provisioning, "_fetch_linkedin_profile_for_resume", _linkedin_reread)
+        monkeypatch.setattr(eng_provisioning, "get_db_connection", lambda: _Conn(rows))
+        monkeypatch.setattr(eng_provisioning, "_resolve_provisioning_job_ids", _job_ids)
+        monkeypatch.setattr(eng_provisioning, "jobdiva_service", fake)
+        monkeypatch.setattr(eng_common, "_utc_now_iso", lambda: NOW)
+        monkeypatch.setattr(eng_provisioning, "_persist_jobdiva_link_state", _record_link_state)
         return asyncio.run(eng._provision_batch_to_jobdiva([r["candidate_id"] for r in rows], JOB))
 
     run.persisted = persisted  # type: ignore[attr-defined]
@@ -180,7 +181,7 @@ def test_jobdiva_row_without_link_id_fails_closed(harness, caplog, monkeypatch):
     """Simulates a regression of the resolver (PR #493 shape): the JobDiva row
     must not reach the service at all."""
     caplog.set_level(logging.ERROR)
-    monkeypatch.setattr(eng, "_resolve_link_candidate_id", lambda *a, **k: None)
+    monkeypatch.setattr(eng_provisioning, "_resolve_link_candidate_id", lambda *a, **k: None)
     fake = _FakeJobDiva()
     results = harness([_row()], fake)
 
@@ -341,7 +342,7 @@ def test_link_state_writes_person_and_job_scopes_separately(monkeypatch):
             pass
 
     conn = _C()
-    monkeypatch.setattr(eng, "get_db_connection", lambda: conn)
+    monkeypatch.setattr(eng_provisioning, "get_db_connection", lambda: conn)
     eng._persist_jobdiva_link_state(
         "exa_x", ["26-1", "123"],
         person_delta={"jobdiva_candidate_id": "777"},
@@ -489,7 +490,7 @@ def test_thin_row_rereads_the_linkedin_profile_before_creating(harness):
 
 
 def test_linkedin_rereads_are_capped_per_batch(harness, monkeypatch):
-    monkeypatch.setattr(eng, "JOBDIVA_PROVISION_LINKEDIN_REFETCH_CAP", 1)
+    monkeypatch.setattr(eng_common, "JOBDIVA_PROVISION_LINKEDIN_REFETCH_CAP", 1)
     fake = _FakeJobDiva(result=JobDivaApplicationOutcome(True, 777, path="created"))
     rows = [
         _row(candidate_id=f"exadeep_{i}", source="LinkedIn-DeepSearch", headline="Data Engineer",
@@ -504,7 +505,7 @@ def test_linkedin_rereads_are_capped_per_batch(harness, monkeypatch):
 
 
 def test_linkedin_reread_can_be_switched_off(harness, monkeypatch):
-    monkeypatch.setattr(eng, "JOBDIVA_PROVISION_LINKEDIN_REFETCH", False)
+    monkeypatch.setattr(eng_common, "JOBDIVA_PROVISION_LINKEDIN_REFETCH", False)
     fake = _FakeJobDiva(result=JobDivaApplicationOutcome(True, 777, path="created"))
     harness([_row(candidate_id="exadeep_1", source="LinkedIn-DeepSearch", headline="Data Engineer")], fake)
 

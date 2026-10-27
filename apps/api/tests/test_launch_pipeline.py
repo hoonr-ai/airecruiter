@@ -11,6 +11,7 @@ import pytest
 import core.config as cfg
 from core import tasks as core_tasks
 from routers import engagement as eng
+from routers.engagement import bulk_send as eng_bulk_send, common as eng_common, launch as eng_launch, pairbot as eng_pairbot, payloads as eng_payloads, routes as eng_routes  # noqa: E402
 
 
 def _run(coro):
@@ -111,13 +112,13 @@ def test_generate_payload_single_query_preserves_request_order(monkeypatch):
                 "phone": "5551234567", "headline": "", "location": "", "data": {}}
     live = {"c3": row("c3", "Cee Three"), "c1": row("c1", "Cee One"), "c2": row("c2", "Cee Two")}
     cur = _FakeCursor(live, dnc={"c9"})
-    monkeypatch.setattr(eng, "_get_db_connection", lambda: _FakeConn(cur))
+    monkeypatch.setattr(eng_common, "_get_db_connection", lambda: _FakeConn(cur))
 
     from types import SimpleNamespace
 
     async def _no_gender(*_a, **_k):
         return SimpleNamespace(gender_label="default", confidence=0.0, source="test")
-    monkeypatch.setattr(eng, "infer_gender_from_name_ai", _no_gender, raising=False)
+    monkeypatch.setattr(eng_payloads, "infer_gender_from_name_ai", _no_gender, raising=False)
 
     res = _run(eng._generate_payload_for(
         eng.GeneratePayloadRequest(candidate_ids=["c2", "c9", "c1", "c8", "c3"], job_id="J1")
@@ -131,14 +132,77 @@ def test_generate_payload_single_query_preserves_request_order(monkeypatch):
     assert len(per_candidate) == 2  # one live ANY() + one DNC ANY(), not N+1
 
 
-def test_fetch_live_rows_schema_drift_fallback():
-    class Drift(_FakeCursor):
-        def execute(self, sql, params=None):
-            if "resume_match_percentage" in sql:
-                raise RuntimeError("column does not exist")
-            super().execute(sql, params)
-    cur = Drift({"a": {"candidate_id": "a"}}, set())
+def test_generate_payload_sends_truncated_raw_resume_text(monkeypatch):
+    def row(cid, resume_text):
+        return {"candidate_id": cid, "name": cid, "email": f"{cid}@x.com",
+                "phone": "5551234567", "headline": "", "location": "", "data": {},
+                "resume_text": resume_text}
+    cap = eng_payloads.PAIRBOT_RAW_RESUME_TEXT_MAX_CHARS
+    live = {
+        "short": row("short", "  Python dev, 5 yrs  "),
+        "long": row("long", "x" * (cap + 50)),
+        "empty": row("empty", "   "),
+        "none": row("none", None),
+    }
+    cur = _FakeCursor(live, dnc=set())
+    monkeypatch.setattr(eng_common, "_get_db_connection", lambda: _FakeConn(cur))
+
+    from types import SimpleNamespace
+
+    async def _no_gender(*_a, **_k):
+        return SimpleNamespace(gender_label="default", confidence=0.0, source="test")
+    monkeypatch.setattr(eng_payloads, "infer_gender_from_name_ai", _no_gender, raising=False)
+
+    res = _run(eng._generate_payload_for(
+        eng.GeneratePayloadRequest(candidate_ids=["short", "long", "empty", "none", "ghost"], job_id="J1")
+    ))
+    by_id = {r["source_candidate_id"]: r for r in json.loads(res["payload"])["resumes"]}
+    assert by_id["short"]["raw_resume_text"] == "Python dev, 5 yrs"
+    assert len(by_id["long"]["raw_resume_text"]) == cap
+    for cid in ("empty", "none", "ghost"):
+        assert "raw_resume_text" not in by_id[cid]
+    live_sql = [s for s in cur.executed if "DISTINCT ON (candidate_id)" in s]
+    assert "resume_text" in live_sql[0]
+
+
+def test_audit_payload_drops_raw_resume_text():
+    payload = {"jd": {"job_id": "J"}, "resumes": [
+        {"source_candidate_id": "a", "raw_resume_text": "secret"},
+        {"source_candidate_id": "b"},
+    ]}
+    stripped = eng_payloads._payload_without_resume_text(payload)
+    assert stripped["resumes"] == [{"source_candidate_id": "a"}, {"source_candidate_id": "b"}]
+    # The payload actually sent is untouched.
+    assert payload["resumes"][0]["raw_resume_text"] == "secret"
+
+
+def test_every_audit_write_serializes_the_payload_without_resume_text():
+    """Each engage_interview_audit insert in bulk_send must go through
+    _audit_payload_json; a raw json.dumps(payload_obj) would store every
+    candidate's résumé in every audit row."""
+    import inspect
+    import re
+
+    payload = {"resumes": [{"source_candidate_id": "a", "raw_resume_text": "secret"}]}
+    assert "raw_resume_text" not in eng_bulk_send._audit_payload_json(payload)
+
+    src = inspect.getsource(eng_bulk_send)
+    inserts = [m.start() for m in re.finditer(r"INSERT INTO engage_interview_audit", src)]
+    assert inserts, "no audit writes found"
+    for start in inserts:
+        call = src[start:start + 600]  # the statement and its parameters
+        assert "_audit_payload_json(payload_obj)" in call, src[start:start + 300]
+    assert not re.search(r"json\.dumps\(\s*payload_obj\b", src)
+
+
+def test_fetch_live_rows_dedupes_ids_and_selects_match_percentage():
+    # No schema-drift fallback any more: a database without the column fails
+    # here. The column is guaranteed by
+    # migrations/20261019_sourced_candidates_resume_match_percentage.sql.
+    cur = _FakeCursor({"a": {"candidate_id": "a"}}, set())
     assert list(eng._fetch_live_sourced_rows(cur, ["a", "a", "b"])) == ["a"]
+    live = [s for s in cur.executed if "FROM sourced_candidates" in s]
+    assert len(live) == 1 and "resume_match_percentage" in live[0]
 
 
 # ------------------------------------------------------- Fix 1 / Fix 2 ----
@@ -148,7 +212,7 @@ def fake_launch(monkeypatch):
     """Fake payload generation + Pairbot send; records each batch's call."""
     calls: List[Dict[str, Any]] = []
     state = {"delay": 0.0, "fail_idx": None, "abort_idx": None, "dnc": set()}
-    monkeypatch.setattr(eng, "_LAUNCH_BATCH_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(eng_launch, "_LAUNCH_BATCH_DELAY_SECONDS", 0.0)
 
     async def fake_generate(req):
         resumes = [{"source_candidate_id": c, "name": c, "email": f"{c}@x.com", "phone": ""}
@@ -169,8 +233,8 @@ def fake_launch(monkeypatch):
         return {"success": True, "bulk_id": f"b{idx}",
                 "data": [{"interview_id": f"i-{c}"} for c in req.real_candidate_ids]}
 
-    monkeypatch.setattr(eng, "_generate_payload_for", fake_generate)
-    monkeypatch.setattr(eng, "_send_bulk_interview_core", fake_core)
+    monkeypatch.setattr(eng_payloads, "_generate_payload_for", fake_generate)
+    monkeypatch.setattr(eng_bulk_send, "_send_bulk_interview_core", fake_core)
     return calls, state
 
 
@@ -201,8 +265,8 @@ def test_gate_resolved_once_for_300_id_launch(monkeypatch, fake_launch):
         def close(self):
             pass
 
-    monkeypatch.setattr(eng, "_get_db_connection", lambda: _FakeConn(Cur()))
-    monkeypatch.setattr(eng, "_fetch_stored_employer_signals", lambda _c, _ids: {})
+    monkeypatch.setattr(eng_common, "_get_db_connection", lambda: _FakeConn(Cur()))
+    monkeypatch.setattr(eng_payloads, "_fetch_stored_employer_signals", lambda _c, _ids: {})
     import services.employer_resolution as er
     n = {"resolve": 0}
 
@@ -226,6 +290,48 @@ def test_gate_resolved_once_for_300_id_launch(monkeypatch, fake_launch):
     assert all(c["precomputed"] is pre for c in calls)
     assert events[0]["type"] == "start" and events[0]["run_id"]
     assert events[-1]["totals"]["sent"] == 300
+
+
+def _capture_recruiter(monkeypatch, calls):
+    async def core(req, precomputed_signals=None, launch_id=None, batch_idx=None, **kw):
+        calls.append(kw.get("recruiter_email"))
+        return {"success": True, "bulk_id": "b0",
+                "data": [{"interview_id": f"i-{c}"} for c in req.real_candidate_ids]}
+    monkeypatch.setattr(eng_bulk_send, "_send_bulk_interview_core", core)
+
+
+def test_launch_sends_authenticated_recruiter_email(monkeypatch, fake_launch):
+    seen: List[Any] = []
+    _capture_recruiter(monkeypatch, seen)
+    monkeypatch.setattr(cfg, "LAUNCH_GATE_ONCE", False)
+    monkeypatch.setattr(eng_routes, "get_current_user", lambda _r, _c: type("U", (), {"email": " Rec@X.com "})())
+    req = eng.LaunchRequest(job_id="J1", candidate_ids=["c-0"], batch_size=75)
+    _run(_collect_after(eng.launch_bulk_interviews(req, http_request=object())))
+    assert seen == ["rec@x.com"]
+
+
+def test_launch_without_user_omits_recruiter_email(monkeypatch, fake_launch):
+    seen: List[Any] = []
+    _capture_recruiter(monkeypatch, seen)
+    monkeypatch.setattr(cfg, "LAUNCH_GATE_ONCE", False)
+
+    def no_user(_r, _c):
+        raise eng.HTTPException(status_code=401, detail="no token")
+    monkeypatch.setattr(eng_routes, "get_current_user", no_user)
+    req = eng.LaunchRequest(job_id="J1", candidate_ids=["c-0"], batch_size=75)
+    _run(_collect_after(eng.launch_bulk_interviews(req, http_request=object())))
+    assert seen == [None]
+
+
+def test_request_bodies_cannot_carry_recruiter_email():
+    # Client-sent values are dropped: only the server sets the recruiter.
+    send = eng.SendBulkInterviewRequest(payload="{}", real_candidate_ids=[], recruiter_email="spoof@x.com")
+    launch = eng.LaunchRequest(job_id="J1", candidate_ids=[], recruiter_email="spoof@x.com")
+    assert not hasattr(send, "recruiter_email") and not hasattr(launch, "recruiter_email")
+
+
+async def _collect_after(coro):
+    return await _collect(await coro)
 
 
 def test_gate_flag_off_passes_no_precomputed(monkeypatch, fake_launch):
@@ -304,7 +410,7 @@ def test_async_launch_returns_202_and_records_events(monkeypatch, fake_launch):
     def fake_db(sql, params, fetch=False):
         writes.append((sql, params))
         return [] if fetch else None
-    monkeypatch.setattr(eng, "_launch_db", fake_db)
+    monkeypatch.setattr(eng_launch, "_launch_db", fake_db)
 
     async def go():
         resp = await eng.launch_bulk_interviews(eng.LaunchRequest(
@@ -339,8 +445,8 @@ def test_webhook_or_sse_prefers_first_success(monkeypatch):
 
     async def hook(bulk_id, timeout_seconds=600.0):
         return {"status": "creation_completed", "data": [1]}
-    monkeypatch.setattr(eng, "_wait_for_pairbot_creation", slow_sse)
-    monkeypatch.setattr(eng, "_poll_launch_batch_creation", hook)
+    monkeypatch.setattr(eng_pairbot, "_wait_for_pairbot_creation", slow_sse)
+    monkeypatch.setattr(eng_launch, "_poll_launch_batch_creation", hook)
     assert _run(eng._wait_for_creation_webhook_or_sse("b"))["data"] == [1]
 
 
@@ -351,8 +457,8 @@ def test_webhook_or_sse_falls_back_when_one_fails(monkeypatch):
 
     async def hook(bulk_id, timeout_seconds=600.0):
         raise RuntimeError("db down")
-    monkeypatch.setattr(eng, "_wait_for_pairbot_creation", sse)
-    monkeypatch.setattr(eng, "_poll_launch_batch_creation", hook)
+    monkeypatch.setattr(eng_pairbot, "_wait_for_pairbot_creation", sse)
+    monkeypatch.setattr(eng_launch, "_poll_launch_batch_creation", hook)
     assert _run(eng._wait_for_creation_webhook_or_sse("b"))["data"] == [2]
 
 
@@ -370,7 +476,7 @@ def test_pairbot_creation_webhook(monkeypatch):
         if "UPDATE launch_batches" in sql:
             return [("row",)] if params[3] == "bulk-1" else []
         return []
-    monkeypatch.setattr(eng, "_launch_db", fake_db)
+    monkeypatch.setattr(eng, "_launch_db", fake_db)  # routers/pairbot_webhook.py imports it from the package
     app = FastAPI()
     app.include_router(pairbot_webhook.router)
     client = TestClient(app)

@@ -463,11 +463,21 @@ class ManualCandidateRequest(BaseModel):
     resume_text: str
 
 class CandidateFeedbackRequest(BaseModel):
-    feedback_type: str # 'Submit', 'Reject', or 'Unreachable'
+    feedback_type: str # 'Submit', 'Reject', 'Unreachable', 'Allotment Slot Filled', or 'Callback Scheduled'
     reason: Optional[str] = Field(None, max_length=500)
     submission_type: Optional[Literal["internal", "external"]] = "external" # 'internal' or 'external' when feedback_type == 'Submit'
     manager_email: Optional[str] = None
     recruiter_notes: Optional[str] = None
+    callback_at: Optional[str] = None # ISO 8601 datetime, required when feedback_type == 'Callback Scheduled'
+    # Pins this write to one exact sourced_candidates row (its PK), bypassing
+    # the candidate_id/jobdiva_id resolution entirely. Optional and unused by
+    # Rankings/Candidates, which have no such id to send; the Upcoming
+    # Callbacks page's Reschedule action sends it (list_upcoming_callbacks'
+    # own row_id) so a multi-sourced candidate's reschedule can target the
+    # specific duplicate row the recruiter is actually looking at, instead of
+    # resolving candidate_id + jobdiva_id again and risking a different
+    # duplicate than the one on screen.
+    sourced_row_id: Optional[int] = None
 
 
 class NotificationItem(BaseModel):

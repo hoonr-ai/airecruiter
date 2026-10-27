@@ -64,7 +64,7 @@ def test_no_candidate_ids_returns_empty():
 
 def test_bulk_still_in_progress_confirms_nothing():
     fake = _FakeAsyncClient(_FakeResponse(200, {"data": {"bulk_in_progress": True, "interviews": []}}))
-    with patch("routers.engagement.httpx.AsyncClient", fake):
+    with patch("routers.engagement.pairbot.httpx.AsyncClient", fake):
         assert _run() == []
 
 
@@ -80,7 +80,7 @@ def test_bulk_done_confirms_only_missing_candidates():
             },
         )
     )
-    with patch("routers.engagement.httpx.AsyncClient", fake):
+    with patch("routers.engagement.pairbot.httpx.AsyncClient", fake):
         result = _run(candidate_ids=("c1", "c2"))
     # c1 has a confirmed interview; only c2 comes back as a real failure.
     assert result == ["c2"]
@@ -90,7 +90,7 @@ def test_bulk_done_with_no_interviews_confirms_all_as_failed():
     fake = _FakeAsyncClient(
         _FakeResponse(200, {"data": {"bulk_in_progress": False, "interviews": []}})
     )
-    with patch("routers.engagement.httpx.AsyncClient", fake):
+    with patch("routers.engagement.pairbot.httpx.AsyncClient", fake):
         result = _run(candidate_ids=("c1", "c2"))
     assert result == ["c1", "c2"]
 
@@ -98,11 +98,11 @@ def test_bulk_done_with_no_interviews_confirms_all_as_failed():
 def test_non_200_status_confirms_nothing():
     """A broken status check must not be read as 'nothing was created'."""
     fake = _FakeAsyncClient(_FakeResponse(500))
-    with patch("routers.engagement.httpx.AsyncClient", fake):
+    with patch("routers.engagement.pairbot.httpx.AsyncClient", fake):
         assert _run() == []
 
 
 def test_request_exception_confirms_nothing():
     fake = _FakeAsyncClient(exc=RuntimeError("network down"))
-    with patch("routers.engagement.httpx.AsyncClient", fake):
+    with patch("routers.engagement.pairbot.httpx.AsyncClient", fake):
         assert _run() == []

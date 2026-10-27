@@ -66,6 +66,9 @@ export type LaunchInput = {
   sendJobPostingEmail?: boolean;
   appBaseUrl?: string;
   batchSize?: number;
+  // Recruiter warm handoff: after the bot's last question, the launching
+  // recruiter is asked to join the candidate's call (Pair-bot contract).
+  recruiterHandoff?: boolean;
 };
 
 // A candidate the BACKEND excluded at launch time (employed by hiring
@@ -232,6 +235,7 @@ export function useEngagementFlow() {
         send_job_posting_email: input.sendJobPostingEmail,
         app_base_url: input.appBaseUrl || (typeof window !== "undefined" ? window.location.origin : ""),
         batch_size: input.batchSize,
+        recruiter_handoff: input.recruiterHandoff ?? false,
         // Honoured only when the server's LAUNCH_ASYNC flag is also on;
         // otherwise the server answers with the SSE stream as before.
         async_launch: LAUNCH_ASYNC,

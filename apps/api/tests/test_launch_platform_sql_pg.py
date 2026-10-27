@@ -10,6 +10,7 @@ TEMP tables inside one transaction that is always rolled back; the race tests
 Skipped when no Postgres is reachable: set LAUNCH_PLATFORM_TEST_DSN (falls
 back to LAUNCH_REPORT_TEST_DSN, then "dbname=postgres").
 """
+import core.tasks as core_tasks
 import asyncio
 import json
 import os
@@ -23,6 +24,7 @@ psycopg2 = pytest.importorskip("psycopg2")
 
 from routers import candidates as rc  # noqa: E402
 from routers import engagement as eng  # noqa: E402
+from routers.engagement import bulk_send as eng_bulk_send, common as eng_common, launch as eng_launch, pairbot as eng_pairbot, payloads as eng_payloads  # noqa: E402
 
 _DSN = os.getenv("LAUNCH_PLATFORM_TEST_DSN") or os.getenv("LAUNCH_REPORT_TEST_DSN", "dbname=postgres")
 JOB, REF = "J1", "26-001"
@@ -79,9 +81,9 @@ def pg(monkeypatch):
             for stmt in eng._LAUNCH_DDL:
                 cur.execute(stmt.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE IF NOT EXISTS"))
         shared = _Shared(conn)
-        monkeypatch.setattr(eng, "_get_db_connection", lambda: shared)
+        monkeypatch.setattr(eng_common, "_get_db_connection", lambda: shared)
         monkeypatch.setattr(rc, "get_db_connection", lambda: shared)
-        monkeypatch.setattr(eng, "_stamp_first_launch", lambda key: None)
+        monkeypatch.setattr(eng_pairbot, "_stamp_first_launch", lambda key: None)
         yield conn
     finally:
         conn.rollback()
@@ -271,7 +273,7 @@ def test_reconcile_with_pairbot_end_to_end(pg, monkeypatch):
     async def by_job(key):
         return {"bulk_in_progress": False,
                 "interviews": [{"interview_id": "iv-p", "source_candidate_id": "p", "jobdiva_id": REF}]}
-    monkeypatch.setattr(eng, "_fetch_pairbot_job_interviews", by_job)
+    monkeypatch.setattr(eng_pairbot, "_fetch_pairbot_job_interviews", by_job)
     out = asyncio.run(eng.reconcile_with_pairbot((JOB, REF), ["p", "q"], session_id="S-1"))
     assert out["sent"] == {"p": "iv-p"} and out["missing"] == ["q"] and out["error"] is None
     assert _data(pg, "p")["engage_interview_id"] == "iv-p"
@@ -429,11 +431,14 @@ def _fake_pairbot(monkeypatch, *, by_job=None, failed_interviews=None, resolve_d
     def spawn(coro, name=None):
         coro.close()
 
-    monkeypatch.setattr(eng, "_post_to_pairbot", post)
-    monkeypatch.setattr(eng, "_wait_for_pairbot_creation", wait)
-    monkeypatch.setattr(eng, "_fetch_pairbot_job_interviews", fetch_by_job)
-    monkeypatch.setattr(eng, "_fetch_stored_employer_signals", lambda _c, _ids: {})
-    monkeypatch.setattr(eng, "_spawn_task", spawn)
+    monkeypatch.setattr(eng_pairbot, "_post_to_pairbot", post)
+    monkeypatch.setattr(eng_pairbot, "_wait_for_pairbot_creation", wait)
+    monkeypatch.setattr(eng_pairbot, "_fetch_pairbot_job_interviews", fetch_by_job)
+    monkeypatch.setattr(eng_payloads, "_fetch_stored_employer_signals", lambda _c, _ids: {})
+    # Inline provisioning goes through core.queue.enqueue, whose fallback
+    # (ARQ_ENABLED off) spawns via core.tasks.spawn.
+    monkeypatch.setattr(core_tasks, "spawn", spawn)
+    monkeypatch.setattr(eng_launch, "_spawn_task", spawn)
     monkeypatch.setattr(er, "resolve_employer_signals", resolve)
     monkeypatch.setattr(er, "stamp_resume_freshness", no_freshness)
     return posts
@@ -514,7 +519,7 @@ def test_reconcile_never_records_a_twin_with_its_twins_interview(pg, monkeypatch
 
     async def by_job(key):
         return {"bulk_in_progress": False, "interviews": [{"interview_id": "iv-X", "source_candidate_id": "X"}]}
-    monkeypatch.setattr(eng, "_fetch_pairbot_job_interviews", by_job)
+    monkeypatch.setattr(eng_pairbot, "_fetch_pairbot_job_interviews", by_job)
     out = asyncio.run(eng.reconcile_with_pairbot((JOB, REF), ["Y"], existing_interview_ids={"Y": "iv-X"}))
     assert out["sent"] == {} and out["missing"] == []
     assert out["duplicate_of"] == {"Y": {"interview_id": "iv-X", "source_candidate_id": "X"}}
@@ -549,7 +554,7 @@ def test_reconcile_holds_missing_while_a_bulk_is_creating(pg, monkeypatch):
 
     async def by_job(key):
         return {"bulk_in_progress": True, "in_progress_details": {"bulk_id": "bk-1"}, "interviews": []}
-    monkeypatch.setattr(eng, "_fetch_pairbot_job_interviews", by_job)
+    monkeypatch.setattr(eng_pairbot, "_fetch_pairbot_job_interviews", by_job)
     out = asyncio.run(eng.reconcile_with_pairbot((JOB, REF), ["q"]))
     assert out["missing"] == [] and out["bulk_in_progress"] is True
 
@@ -578,8 +583,8 @@ def pg_pair(monkeypatch):
                 _DSN, connect_timeout=3, options=f"-c search_path={schema} -c lock_timeout=15000",
             ))
         local = threading.local()
-        monkeypatch.setattr(eng, "_get_db_connection", lambda: local.conn)
-        monkeypatch.setattr(eng, "_stamp_first_launch", lambda key: None)
+        monkeypatch.setattr(eng_common, "_get_db_connection", lambda: local.conn)
+        monkeypatch.setattr(eng_pairbot, "_stamp_first_launch", lambda key: None)
         yield admin, workers, local
     finally:
         for w in workers:

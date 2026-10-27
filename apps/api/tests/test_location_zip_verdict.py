@@ -21,6 +21,7 @@ from services.jobdiva_boolean_translator import (  # noqa: E402
 from services.unified_candidate_search import (  # noqa: E402
     UnifiedCandidateSearch,
     SearchCriteria,
+    _UNKNOWN_DISTANCE_SENTINEL,
 )
 
 
@@ -215,12 +216,12 @@ def test_verdict_missing_location_soft_keep_sentinel(svc):
     "Midwest Region",
 ])
 def test_verdict_broad_region_is_unverified_without_geocoding(svc, monkeypatch, location):
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def unexpected_geocode(*args, **kwargs):
         raise AssertionError("broad region labels must not be treated as point locations")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     ok, reason, distance = svc._location_match_verdict(
         {"location": location}, _criteria()
     )
@@ -240,12 +241,12 @@ def test_verdict_broad_region_is_unverified_without_geocoding(svc, monkeypatch, 
 def test_verdict_named_region_outside_search_state_is_mismatch(svc, monkeypatch, location):
     """A LinkedIn metro whose states miss the search location is a confirmed
     mismatch, not an unverified keep. Tempe, AZ does not cover IL/CA/WA."""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def unexpected_geocode(*args, **kwargs):
         raise AssertionError("broad region labels must not be treated as point locations")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     ok, reason, _distance = svc._location_match_verdict(
         {"location": location}, _criteria()
     )
@@ -253,12 +254,12 @@ def test_verdict_named_region_outside_search_state_is_mismatch(svc, monkeypatch,
 
 
 def test_broad_region_with_state_suffix_still_uses_state_but_not_radius(svc, monkeypatch):
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def unexpected_geocode(*args, **kwargs):
         raise AssertionError("a broad region label must not be geocoded as a point")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     ok, reason, distance = svc._location_match_verdict(
         {"location": "San Francisco Bay Area, CA"},
         _criteria(location="Mountain View, CA 94043"),
@@ -327,12 +328,12 @@ def test_new_york_city_alias_closes_multi_location_soft_keep_leak(svc, monkeypat
     _location_match_verdict's precedence, by design). Fixing the alias makes
     the NYC anchor resolve offline like the other 4, so there is no longer any
     soft-keep left to win the race."""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def boom(*a, **kw):
         raise AssertionError("all 5 anchors must resolve offline — no Nominatim needed")
 
-    monkeypatch.setattr(ucs, "within_radius", boom)
+    monkeypatch.setattr(ucs_location, "within_radius", boom)
 
     criteria = _criteria(
         location="Hartford, CT",
@@ -445,6 +446,216 @@ def test_hard_gate_soft_keeps_county_and_metroplex_as_unverified(svc):
     assert dfw_near.get("location") == "Dallas-Fort Worth Metroplex"
 
 
+def test_hard_gate_drops_same_state_far_metro_confirmed_outside(svc):
+    """QA regression: a multi-ZIP search for 10001 New York / 90001 Los
+    Angeles / 77002 Houston kept "Dallas-Fort Worth Metroplex" and "Austin,
+    Texas Metropolitan Area" candidates — both Texas, same state as the
+    Houston ZIP, but ~146-225mi from it, a different metro entirely. Before
+    this fix, a same-state broad region never checked its core city's
+    distance at all and fell straight to broad_region_unverified (soft-
+    keep) regardless of how far away it actually was — only a state
+    MISMATCH triggered the core-distance check. Now it's checked either
+    way, so a confirmed-far same-state metro hard-drops too."""
+    dfw_vs_houston = {"location": "Dallas-Fort Worth Metroplex"}
+    veto = svc._location_hard_gate(dfw_vs_houston, _criteria(location="Houston, TX", within_miles=50))
+    assert veto and "outside" in veto
+    assert dfw_vs_houston.get("location_veto_reason") == "outside_radius_confirmed"
+    assert dfw_vs_houston.get("distance_miles") > 50
+
+    austin_vs_houston = {"location": "Austin, Texas Metropolitan Area"}
+    veto = svc._location_hard_gate(austin_vs_houston, _criteria(location="Houston, TX", within_miles=50))
+    assert veto and "outside" in veto
+    assert austin_vs_houston.get("location_veto_reason") == "outside_radius_confirmed"
+    assert austin_vs_houston.get("distance_miles") > 50
+
+
+def test_hard_gate_soft_keeps_a_nearby_suburb_search_against_a_metro_label(svc):
+    """PR #859 review: a broad label's one core-city point stands in for a
+    whole metro, which genuinely spans well beyond that single point —
+    Fort Worth is ~32mi from the Dallas core both carry the same
+    "Dallas-Fort Worth Metroplex" label. Hard-dropping purely on
+    core-to-search distance would wrongly drop a real in-metro suburb
+    search; _BROAD_REGION_CORE_BUFFER_MILES exists so this stays a
+    soft-keep instead, the same as it was before PR #859's core-distance
+    check started running for the same-state case at all."""
+    dfw_vs_fort_worth = {"location": "Dallas-Fort Worth Metroplex"}
+    assert svc._location_hard_gate(
+        dfw_vs_fort_worth, _criteria(location="Fort Worth, TX", within_miles=25)
+    ) is None
+    assert dfw_vs_fort_worth.get("location_match_reason") == "broad_region_unverified"
+
+
+def test_hard_gate_drops_newly_recognized_regions_in_the_wrong_state(svc):
+    """QA regression: "Boise Metropolitan Area" (ID) against a Dallas/
+    Phoenix/San Diego/Philadelphia search, and "Greater Tampa Bay Area"
+    (FL) against a New York/Los Angeles/Houston search, were both soft-kept
+    instead of hard-dropped — neither label was in _REGION_STATE_LABELS/
+    _REGION_CORE_CITY, so the gate had no state or distance signal for them
+    at all and fell through to broad_region_unverified unconditionally."""
+    boise = {"location": "Boise Metropolitan Area"}
+    veto = svc._location_hard_gate(boise, _criteria(location="Dallas, TX", within_miles=50))
+    assert veto
+    assert boise.get("location_veto_reason") == "state_mismatch"
+
+    tampa = {"location": "Greater Tampa Bay Area"}
+    veto = svc._location_hard_gate(tampa, _criteria(location="Houston, TX", within_miles=50))
+    assert veto
+    assert tampa.get("location_veto_reason") == "state_mismatch"
+
+
+def test_hard_gate_drops_confirmed_far_regions_qa_2026_10_27(svc):
+    """QA regression (2026-10-27 multi-ZIP run): "Queens County, NY" (~293mi
+    from a 25mi Frewsburg, NY 14738 search), "San Diego Metropolitan Area"
+    (~458mi from a 25mi San Francisco 94111 search), and "Buffalo-Niagara
+    Falls Area" (~40mi from the same Frewsburg search) were all soft-kept
+    forever — none of the three labels had a _REGION_CORE_CITY entry, so
+    _broad_core_radius_distance always returned None regardless of true
+    distance. Queens and Buffalo-Niagara also exercise the ", NY" suffix
+    that _region_label_key must strip to find the state-less table entry."""
+    queens = {"location": "Queens County, NY"}
+    veto = svc._location_hard_gate(queens, _criteria(location="Frewsburg, NY 14738", within_miles=25))
+    assert veto and "outside" in veto
+    assert queens.get("location_veto_reason") == "outside_radius_confirmed"
+    assert queens.get("distance_miles") > 100
+
+    san_diego = {"location": "San Diego Metropolitan Area"}
+    veto = svc._location_hard_gate(san_diego, _criteria(location="San Francisco, CA 94111", within_miles=25))
+    assert veto and "outside" in veto
+    assert san_diego.get("location_veto_reason") == "outside_radius_confirmed"
+    assert san_diego.get("distance_miles") > 100
+
+    # Buffalo's core is ~59mi from Frewsburg — within the 25+50mi buffer, so
+    # this one stays a deliberate soft-keep (the buffer exists precisely so a
+    # metro label's single representative point doesn't hard-drop a real
+    # edge-of-metro candidate). The regression this guards is that it now
+    # gets a REAL computed distance at all, instead of being stuck behind
+    # the None-core sentinel forever regardless of true distance.
+    buffalo = {"location": "Buffalo-Niagara Falls Area"}
+    assert svc._location_hard_gate(
+        buffalo, _criteria(location="Frewsburg, NY 14738", within_miles=25)
+    ) is None
+    assert buffalo.get("location_match_reason") == "broad_region_unverified"
+    assert buffalo.get("distance_miles") is None  # soft-keep still suppresses the badge value
+
+
+def test_bare_state_location_is_unverified_not_silently_confirmed(svc):
+    """QA regression (2026-10-27): a candidate whose entire location text is
+    a bare state ("NJ", no city, no comma) matched neither
+    is_broad_region_location's old checks nor the "precise" city+state
+    shape, so it fell through to a live Nominatim geocode of "NJ" alone,
+    which resolves to a real (state-centroid) point and was reported as a
+    CONFIRMED match/distance — never flagged "Location unverified", unlike
+    LinkedIn's "Greater Chicago Area"-style broad labels. Also must not
+    start hard-dropping a bare state that's a neighbor of the search's own
+    state (NJ candidates a few miles from NYC are a QA-confirmed case that
+    must stay soft-kept)."""
+    bare_nj = {"location": "NJ"}
+    assert svc._location_hard_gate(bare_nj, _criteria(location="New York, NY", within_miles=25)) is None
+    assert bare_nj.get("location_match_reason") == "broad_region_unverified"
+    assert bare_nj.get("location_veto_reason") is None
+
+    # A bare state with no plausible proximity to the search still drops.
+    bare_ca = {"location": "CA"}
+    veto = svc._location_hard_gate(bare_ca, _criteria(location="New York, NY", within_miles=25))
+    assert veto
+    assert bare_ca.get("location_veto_reason") == "state_mismatch"
+
+
+def test_region_state_labels_and_core_city_tables_stay_in_sync():
+    """PR #859 review: _REGION_STATE_LABELS and _REGION_CORE_CITY
+    (services/location.py) are two hand-maintained dicts that must agree —
+    a label with a known state but no known core city can never get the
+    distance check that tells a confirmed-far same-state metro apart from
+    a nearby in-metro suburb (see _broad_core_radius_distance). Catches the
+    kind of drift that's easy to introduce when adding a new label to only
+    one of the two tables."""
+    from services.location import _REGION_CORE_CITY, _REGION_STATE_LABELS
+
+    missing_core = set(_REGION_STATE_LABELS) - set(_REGION_CORE_CITY)
+    assert not missing_core, f"labels with a state but no core city: {missing_core}"
+    missing_state = set(_REGION_CORE_CITY) - set(_REGION_STATE_LABELS)
+    assert not missing_state, f"labels with a core city but no state: {missing_state}"
+
+
+def test_region_label_key_strips_trailing_state_suffix(svc):
+    """PR review follow-up: _region_label_key now strips a trailing ", ST"
+    so a label carrying one ("Queens County, NY") still finds its
+    state-less table entry ("queens county"). Covers the stripping
+    directly, plus guards the exact collision risk the review flagged:
+    none of today's registered keys may themselves end in that ", ST"
+    shape, since stripping it would then look up the WRONG (truncated)
+    key instead of the intended one."""
+    import re as _re
+
+    from services.location import _REGION_CORE_CITY, _REGION_STATE_LABELS, _region_label_key
+
+    assert _region_label_key("Queens County, NY") == "queens county"
+    assert _region_label_key("Queens County") == "queens county"
+    assert _region_label_key("queens county, ny") == "queens county"
+    # Unaffected: no trailing 2-letter suffix to strip.
+    assert _region_label_key("Greater Chicago Area") == "greater chicago area"
+    # The "united states"/"usa" suffix strip still takes priority and still
+    # works for a 2-letter-shaped tail that isn't a real state suffix
+    # pattern match target here, just confirming no interaction bug.
+    assert _region_label_key("New York, United States") == "new york"
+
+    suffixed_keys = {k for k in set(_REGION_STATE_LABELS) | set(_REGION_CORE_CITY) if _re.search(r",\s*[A-Za-z]{2}$", k)}
+    assert not suffixed_keys, (
+        f"registered keys ending in a bare ', ST' suffix would be silently "
+        f"truncated by _region_label_key's own stripping on lookup: {suffixed_keys}"
+    )
+
+
+def test_is_labeled_region_distinguishes_named_metros_from_bare_states():
+    """PR review follow-up: is_labeled_region gates the state_mismatch
+    demotion in _single_location_match_verdict — a named, curated metro
+    label must say True (its adjacency is hand-listed), a bare state name/
+    code must say False (no such curation exists for it)."""
+    from services.location import is_labeled_region
+
+    assert is_labeled_region("Greater Chicago Area") is True
+    assert is_labeled_region("greater philadelphia area") is True
+    assert is_labeled_region("Queens County, NY") is True  # added by this PR
+    assert is_labeled_region("NJ") is False
+    assert is_labeled_region("New Jersey") is False
+    assert is_labeled_region("Not A Real Region") is False
+
+
+def test_bare_state_mismatch_falls_back_to_hard_drop_when_adjacency_unknown(svc):
+    """PR review follow-up: _ADJACENT_STATES is hand-curated and doesn't
+    cover every state. A bare state for a search state that's absent from
+    the map (e.g. Maine, "ME", has no entry) must fall back to today's
+    hard-drop behavior rather than silently guessing it might be nearby —
+    the documented, deliberately conservative trade-off."""
+    assert "ME" not in svc._ADJACENT_STATES
+    bare_other = {"location": "NH"}  # New Hampshire, genuinely not Maine
+    veto = svc._location_hard_gate(bare_other, _criteria(location="Portland, ME", within_miles=25))
+    assert veto
+    assert bare_other.get("location_veto_reason") == "state_mismatch"
+
+
+def test_bare_state_branch_does_not_swallow_a_precise_city_state(svc):
+    """PR review follow-up: is_broad_region_location's bare-state check is
+    guarded by "no comma in the string" specifically so a real city+state
+    pair that happens to end in a short, state-code-shaped token ("Washington,
+    IN" — Washington, Indiana) is never misread as a bare state. It has a
+    comma, so it never reaches that branch at all; it resolves as a normal
+    precise city+state match instead."""
+    from services.location import is_broad_region_location
+
+    assert is_broad_region_location("Washington, IN") is False
+    assert is_broad_region_location("IN") is True  # bare, no comma — the actual target case
+
+    washington_in = {"location": "Washington, IN"}
+    svc._location_hard_gate(washington_in, _criteria(location="Indianapolis, IN", within_miles=50))
+    # Resolved as a precise same-state city with a real offline distance
+    # (~96mi, genuinely outside this radius) — NOT the broad/unverified
+    # branch the bare-state check would wrongly route it through if the
+    # comma guard were ever lost.
+    assert washington_in.get("location_match_reason") == "outside_radius_confirmed"
+    assert isinstance(washington_in.get("distance_miles"), float)
+
+
 def test_broad_region_bare_literals_do_not_over_match_prefixed_strings():
     """"chicagoland" and "silicon valley" are bare literals (no leading `.+`
     wildcard) in _BROAD_REGION_RE, matched via .fullmatch(). A prefixed
@@ -477,10 +688,10 @@ def test_hard_gate_allows_unknown_location_for_remote_job(svc):
 
 
 def test_hard_gate_soft_keeps_transient_geocoder_failure(svc, monkeypatch):
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     monkeypatch.setattr(
-        ucs, "within_radius",
+        ucs_location, "within_radius",
         lambda *args, **kwargs: (False, "candidate_ungeocodable", None),
     )
     import services.location as loc
@@ -500,7 +711,7 @@ def test_verdict_resume_location_is_judged_when_present(svc, monkeypatch):
     ("Tucson, AZ" here) is not consulted alongside it. (Superseded the
     2026-07-30 source-native-wins policy by product request: JobDiva agent
     records saying "US" for résumés headed "India" were being launched.)"""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     geocoded = []
 
@@ -508,7 +719,7 @@ def test_verdict_resume_location_is_judged_when_present(svc, monkeypatch):
         geocoded.append(candidate_loc)
         raise AssertionError("a broad metro label must not be geocoded as an exact point")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     ok, reason, dist = svc._location_match_verdict(
         {
             "enhanced_info": {"current_location": "Phoenix Metropolitan Area"},
@@ -529,7 +740,7 @@ def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, 
     26-22448): the source-native location is authoritative and the
     LLM-extracted string is NOT consulted while `candidate.location` is
     present — it can neither rescue nor condemn the candidate."""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
     from core import sourcing_config
 
     monkeypatch.setattr(sourcing_config, "RESUME_LOCATION_AUTHORITATIVE", False)
@@ -539,7 +750,7 @@ def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, 
         geocoded.append(candidate_loc)
         return True, "ok", 16.3
 
-    monkeypatch.setattr(ucs, "within_radius", fake_within_radius)
+    monkeypatch.setattr(ucs_location, "within_radius", fake_within_radius)
     ok, reason, dist = svc._location_match_verdict(
         {
             "enhanced_info": {"current_location": "Phoenix Metropolitan Area"},
@@ -559,7 +770,7 @@ def test_verdict_source_native_location_beats_llm_extraction_when_flag_off(svc, 
 def test_verdict_broad_resume_location_is_unverified_when_source_blank(svc, monkeypatch):
     """A broad résumé location is displayable, but not precise enough to
     confirm or reject a configured radius."""
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     geocoded = []
 
@@ -567,7 +778,7 @@ def test_verdict_broad_resume_location_is_unverified_when_source_blank(svc, monk
         geocoded.append(candidate_loc)
         raise AssertionError("broad metro label must not be geocoded")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     ok, reason, dist = svc._location_match_verdict(
         {
             "enhanced_info": {"current_location": "Phoenix Metropolitan Area"},
@@ -581,12 +792,12 @@ def test_verdict_broad_resume_location_is_unverified_when_source_blank(svc, monk
 
 
 def test_verdict_all_signals_offline_skips_nominatim(svc, monkeypatch):
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def boom(*a, **kw):
         raise AssertionError("Nominatim must not be called when all signals resolve offline")
 
-    monkeypatch.setattr(ucs, "within_radius", boom)
+    monkeypatch.setattr(ucs_location, "within_radius", boom)
     ok, reason, dist = svc._location_match_verdict(
         {"location": "Tucson, AZ 85701"}, _criteria()
     )
@@ -607,6 +818,189 @@ def test_parse_location_takes_trailing_zip_in_address(svc):
 
 def test_parse_location_zip_kept_when_state_agrees(svc):
     assert svc._parse_location("Tempe, AZ 85281")["zip"] == "85281"
+
+
+def test_parse_location_recognizes_zip_plus_four_with_any_separator(svc):
+    """ZIP+4 gap closed entirely: dash, space, or no separator at all are
+    all the same thing ("77002-1234" == "77002 1234" == "770021234"), and
+    all three must extract cleanly with nothing left over — a leftover
+    numeric fragment (the space-separated case, before this) is exactly
+    what let a bad search zip bypass the search_location_unresolvable
+    consistency check below (see
+    test_verdict_space_separated_bad_zip_plus_four_is_still_consistent)."""
+    for value in ("77002-1234", "77002 1234", "770021234"):
+        parsed = svc._parse_location(value)
+        assert parsed["zip"] == "77002", value
+        assert parsed["city"] == "", value
+
+
+def test_parse_location_does_not_over_match_a_ten_digit_run(svc):
+    """A 10-digit run isn't a 5+4 zip in any spacing — must not silently
+    swallow the first 5 digits and leave a mystery digit behind. The
+    whole run should fall through untouched, as a literal city string,
+    not partially consumed."""
+    parsed = svc._parse_location("7700212345")
+    assert parsed["zip"] == ""
+    assert parsed["city"] == "7700212345"
+
+
+def test_parse_location_short_numeric_string_is_not_recognized_as_a_zip(svc):
+    """CHARACTERIZATION TEST, not a spec: documents today's backend
+    behavior (which the frontend's Step 5 location input now guards
+    against instead — addSourceLocation rejects a non-5-digit numeric
+    value before it ever reaches a search) rather than asserting it's
+    correct. A partial zip like "77" or "770" isn't recognized as a zip
+    attempt at all — it's parsed as a literal city NAME, which then can't
+    match any real candidate's city and silently constrains nothing. If
+    _parse_location ever learns to recognize a short numeric string as a
+    malformed zip instead, this test's expectations must change too."""
+    for partial in ("7", "77", "770"):
+        parsed = svc._parse_location(partial)
+        assert parsed["zip"] == ""
+        assert parsed["city"] == partial
+
+
+def test_verdict_warns_once_per_unresolvable_search_zip(svc, caplog):
+    """PR #859 review (Medium): the frontend's zip-lookup guard only covers
+    Step 5's own input — saved/loaded job criteria, API callers, and a zip
+    embedded in a longer string all reach this same resolution path, and an
+    unresolvable one used to fail completely silently (every candidate
+    passes the location filter unfiltered, since the search's own anchor
+    point can't be placed). Not hard-failed here — that's a bigger, riskier
+    change for a single bad search — but it must at least be logged."""
+    import logging
+    from services.unified_candidate_search import location as ucs_location
+
+    ucs_location._WARNED_UNRESOLVABLE_SEARCH_ZIPS.discard("09999")
+    candidate = {"location": "Houston, TX"}
+    with caplog.at_level(logging.WARNING):
+        svc._single_location_match_verdict(candidate, _criteria(location="09999", within_miles=25))
+    assert any("unresolvable_search_zip" in r.message and "09999" in r.message for r in caplog.records)
+
+    # Deduped: a second candidate against the SAME unresolvable zip doesn't
+    # log again (would otherwise be one warning per row of every search
+    # using it).
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        svc._single_location_match_verdict({"location": "Dallas, TX"}, _criteria(location="09999", within_miles=25))
+    assert not any("unresolvable_search_zip" in r.message for r in caplog.records)
+
+
+def test_verdict_unresolvable_search_zip_is_consistent_regardless_of_candidate_shape(svc):
+    """Follow-up to the warning-log fix above: before this, an unresolvable
+    search zip only cleanly soft-kept a candidate with a BROAD-region label
+    (it fell through to broad_region_unverified). A candidate with a
+    PRECISE location instead reached the Nominatim fallback and geocoded
+    the same unresolvable text live — which can return a confidently wrong
+    verdict (a real but unintended place) instead of an honest "can't
+    tell." Both candidate shapes must now get the identical, correct
+    answer with no live geocode involved."""
+    criteria = _criteria(location="99999-1234", within_miles=25)
+
+    precise = {"location": "Houston, TX"}
+    assert svc._single_location_match_verdict(precise, criteria) == (
+        False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL,
+    )
+
+    broad = {"location": "Dallas-Fort Worth Metroplex"}
+    assert svc._single_location_match_verdict(broad, criteria) == (
+        False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL,
+    )
+
+
+def test_verdict_zip_plus_four_resolves_normally_when_assigned(svc):
+    """ZIP+4 follow-up: a well-formed, assigned ZIP+4 search still resolves
+    via its 5-digit part exactly as a bare zip would — this isn't a new
+    restriction, only the unassigned case above is. Relies on 77002
+    (downtown Houston) being a real entry in the offline zip dataset, same
+    as every other real-zip test in this file (e.g. test_zip_index_lookup_
+    and_distance) — not something this test sets up itself."""
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="77002-1234", within_miles=25)
+    )
+    assert result[0] is True
+
+
+def test_verdict_zip_plus_four_with_an_unassigned_five_digit_part(svc):
+    """ZIP+4 counterpart to test_verdict_zip_plus_four_resolves_normally_
+    when_assigned: a well-formed ZIP+4 whose 5-digit part isn't an assigned
+    zip (99999 is outside the real range) hits the exact same
+    search_location_unresolvable path a bad bare zip does — confirmed at
+    the verdict level, not just via _location_hard_gate (which covers this
+    same input in test_hard_gate_soft_keeps_an_unresolvable_search_location)."""
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="99999-1234", within_miles=25)
+    )
+    assert result == (False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL)
+
+
+def test_verdict_space_separated_bad_zip_plus_four_is_still_consistent(svc):
+    """Found while auditing the ZIP+4 fix for other gaps: "99999 1234" (a
+    SPACE before the +4 suffix, not a dash) used to not be stripped as a
+    zip by _parse_location the way the dash form was — only the 5-digit
+    zip got pulled out, leaving "1234" behind as a spurious "city". That
+    defeated the all-blank check above (a non-empty "city" looked like a
+    second, independent location signal), so this exact input bypassed the
+    consistency fix and fell through to a live Nominatim geocode of "1234"
+    — producing a confidently wrong hard-drop instead of an honest "can't
+    tell" for a precise-location candidate. Now fixed at the root
+    (_parse_location consumes the +4 suffix regardless of separator, see
+    test_parse_location_recognizes_zip_plus_four_with_any_separator) —
+    this is a regression guard for that, and for the "no city name is
+    purely digits" belt-and-suspenders check above it, in case some other
+    path ever again leaves a numeric fragment behind."""
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="99999 1234", within_miles=25)
+    )
+    assert result == (False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL)
+
+
+def test_verdict_no_separator_bad_zip_plus_four_is_also_consistent(svc):
+    """Last of the ZIP+4 separator forms: no separator at all
+    ("999991234") must behave identically to the dash and space forms —
+    a clean search_location_unresolvable, not a rejected-as-garbage "city"
+    (which _parse_location would have produced before the regex fix) and
+    not a live-geocode-driven hard-drop either."""
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="999991234", within_miles=25)
+    )
+    assert result == (False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL)
+
+
+def test_verdict_has_real_city_guard_holds_even_if_parsing_ever_regresses(svc, monkeypatch):
+    """Isolates the has_real_city/isdigit() guard itself, independent of
+    the _parse_location regex fix above: even if some future change to
+    _parse_location ever again left a purely-numeric fragment behind as
+    "city" for an unresolvable zip, that fragment must still not count as
+    a real second location signal."""
+    monkeypatch.setattr(
+        svc, "_parse_location",
+        lambda value: {"city": "1234", "state": "", "zip": "99999", "country": ""},
+    )
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="99999 1234", within_miles=25)
+    )
+    assert result == (False, "search_location_unresolvable", _UNKNOWN_DISTANCE_SENTINEL)
+
+
+def test_verdict_embedded_unresolvable_zip_still_uses_city_state_fallback(svc):
+    """A search like "Houston, TX 99999" has a real city/state alongside
+    the bad zip — it must keep using that city/state fallback (unchanged
+    behavior), not get swept into the new zip-is-the-only-signal
+    short-circuit above."""
+    result = svc._single_location_match_verdict(
+        {"location": "Houston, TX"}, _criteria(location="Houston, TX 99999", within_miles=25)
+    )
+    assert result[0] is True
+    assert result[1] != "search_location_unresolvable"
+
+
+def test_hard_gate_soft_keeps_an_unresolvable_search_location(svc):
+    candidate = {"location": "Houston, TX"}
+    veto = svc._location_hard_gate(candidate, _criteria(location="99999-1234", within_miles=25))
+    assert veto is None
+    assert candidate.get("location_match_reason") == "search_location_unresolvable"
+    assert candidate.get("distance_miles") is None
 
 
 def test_resolve_geo_address_street_number_not_sent_as_zip(svc):
@@ -703,12 +1097,12 @@ def test_greater_philadelphia_inside_pennington_radius_stays_unverified(svc, mon
     The metro label must not hard-drop on the state line. Chicago is outside
     that circle, so it still drops.
     """
-    import services.unified_candidate_search as ucs
+    import services.unified_candidate_search.location as ucs_location
 
     def unexpected_geocode(*args, **kwargs):
         raise AssertionError("broad region labels must not be treated as point locations")
 
-    monkeypatch.setattr(ucs, "within_radius", unexpected_geocode)
+    monkeypatch.setattr(ucs_location, "within_radius", unexpected_geocode)
     pennington = _criteria(location="Pennington, NJ", within_miles=50)
     ok, reason, _distance = svc._location_match_verdict(
         {"location": "Greater Philadelphia Area"}, pennington

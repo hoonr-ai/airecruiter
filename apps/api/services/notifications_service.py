@@ -1,5 +1,8 @@
 """In-app notification creation, alongside (never instead of) this app's
-existing email notifications. Nine types today:
+existing email notifications. Ten types today, plus the two recruiter-handoff
+types (recruiter_handoff_requested / recruiter_handoff_missed), which are
+created by services/recruiter_handoff.py from Pair-bot's handoff webhooks and
+documented there:
 
 - candidate_passed (create_candidate_passed_notifications): a candidate's
   interview result. Independent of the pass-email trigger in
@@ -111,6 +114,26 @@ existing email notifications. Nine types today:
   (_candidate_level_duplicate_in_last_minute), not a permanent index: a
   genuine second review cycle must still notify.
 
+- candidate_callback_reminder (create_candidate_callback_reminder_notification):
+  fires ~5 minutes before a recruiter's own self-scheduled callback time
+  (save_candidate_feedback's feedback_type == "Callback Scheduled"). Unlike
+  every other type above, this one is never created immediately — it's
+  queued via task_outbox.add's `available_at` for that future moment, and
+  only the outbox relay actually calls it when that time comes. Candidate-
+  level, single recipient (the recruiter who scheduled it) — its own sync
+  helper rather than reusing _create_candidate_notification_for_recipient_sync
+  because the body needs the formatted callback time, not just a title.
+  Excluded from the candidate-level "once ever" index (ONCE_EVER_EXCLUDED_
+  TYPES) — a recipient legitimately gets many of these over time, one per
+  reschedule, not just the first ever. Confirmed live in QA (PR #856): with
+  this type still under that index and a bare insert, the first reminder a
+  (recipient, candidate, job) combo ever got permanently UniqueViolation'd
+  every later one, so no reschedule's reminder ever fired again. Dedupes
+  instead on its own per-occurrence index, scoped by callback_at
+  (_CONFLICT_CALLBACK_REMINDER) — task_outbox's dedupe_key already keeps a
+  given callback's own task from running twice, so this index only matters
+  for an outright retry of that same run.
+
 One row is written per recruiter in the job's `recruiter_emails`, via
 `INSERT ... ON CONFLICT ... DO NOTHING RETURNING id` so concurrent
 deliveries — webhook retries, racing uvicorn workers, or (for the job-level
@@ -133,6 +156,7 @@ import psycopg2.extras
 
 from core.advisory_lock import AdvisoryLock
 from core.db import get_db_connection
+from services.sourced_candidate_dedup import CALLBACK_ROW_TIEBREAKER
 from services.engage_status import (
     format_engage_status,
     hf_display_from_payload,
@@ -149,7 +173,18 @@ logger = logging.getLogger(__name__)
 # routers/notifications.py (both the narrowed unique index and its own
 # review-loop lookup index) imports this, so the two can't drift apart.
 REVIEW_LOOP_TYPES = ("candidate_internal_review_requested", "candidate_externally_submitted")
-_REVIEW_LOOP_TYPES_SQL = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
+
+# Excluded from the "once ever" index below for an unrelated reason than
+# REVIEW_LOOP_TYPES — see this module's own docstring, candidate_callback_
+# reminder entry.
+CALLBACK_REMINDER_TYPE = "candidate_callback_reminder"
+# Single source of truth for the predicate excluding both of the above from
+# the "once ever" index — imported by routers/notifications.py so the
+# index DDL there can't drift from the ON CONFLICT clause here (exactly
+# that kind of drift broke candidate_passed/rejected entirely once already,
+# see this module's own docstring).
+ONCE_EVER_EXCLUDED_TYPES = REVIEW_LOOP_TYPES + (CALLBACK_REMINDER_TYPE,)
+_ONCE_EVER_EXCLUDED_TYPES_SQL = ", ".join(f"'{t}'" for t in ONCE_EVER_EXCLUDED_TYPES)
 
 # Candidate-level dedup: one row per (recipient, candidate, job, type) ever.
 # Shared by every candidate-level "once ever" type (candidate_passed,
@@ -163,7 +198,18 @@ _REVIEW_LOOP_TYPES_SQL = ", ".join(f"'{t}'" for t in REVIEW_LOOP_TYPES)
 # below for the same rule applied to a different partial index).
 _CONFLICT_CANDIDATE_LEVEL = (
     "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, type) "
-    f"WHERE type NOT IN ({_REVIEW_LOOP_TYPES_SQL}) "
+    f"WHERE type NOT IN ({_ONCE_EVER_EXCLUDED_TYPES_SQL}) "
+    "DO NOTHING"
+)
+# candidate_callback_reminder's own per-occurrence dedup — matches
+# uniq_notifications_callback_reminder_occurrence in routers/notifications.py
+# exactly (same predicate-matching requirement as _CONFLICT_CANDIDATE_LEVEL
+# above). Scoped by callback_at (stored in metadata, not a column) so a
+# genuinely new callback (a reschedule) still gets its own reminder, while a
+# retried run of the exact same task_outbox row can't double-insert one.
+_CONFLICT_CALLBACK_REMINDER = (
+    "ON CONFLICT (recipient_email, candidate_id, jobdiva_id, (metadata->>'callback_at')) "
+    f"WHERE type = '{CALLBACK_REMINDER_TYPE}' "
     "DO NOTHING"
 )
 # Job-level dedup, matching the partial unique index of the same name in
@@ -217,6 +263,7 @@ def _insert_notification(
     title: str,
     body: Optional[str],
     score: Optional[float],
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """candidate_id is None for job-level event types (pair_launched,
     pair_inactive). pair_inactive passes its own type-specific
@@ -226,29 +273,53 @@ def _insert_notification(
     so it would silently stop deduping at all for this type. pair_launched
     and recruiter_assigned omit conflict_clause entirely (bare INSERT, no ON
     CONFLICT) since their dedup is an application-level pre-insert check
-    done by their caller instead (see _job_level_duplicate_in_last_minute)."""
+    done by their caller instead (see _job_level_duplicate_in_last_minute).
+
+    `metadata` carries structured data the frontend needs to render itself
+    (e.g. a raw ISO timestamp it can format in the viewer's own local
+    timezone) — distinct from `title`/`body`, which are pre-rendered,
+    server-chosen text."""
     cur.execute(
         f"""
         INSERT INTO notifications
-            (recipient_email, type, job_id, jobdiva_id, candidate_id, title, body, score)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (recipient_email, type, job_id, jobdiva_id, candidate_id, title, body, score, metadata)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
         {conflict_clause or ""}
         RETURNING id
         """,
-        (recipient_email, notification_type, job_id, jobdiva_id, candidate_id, title, body, score),
+        (recipient_email, notification_type, job_id, jobdiva_id, candidate_id, title, body, score,
+         json.dumps(metadata or {})),
     )
     row = cur.fetchone()
     return row is not None
 
 
-def _fetch_job_and_candidate(cur, job_id: str, candidate_id: str):
+def _fetch_job_and_candidate(cur, job_id: str, candidate_id: str, prefer_callback_scheduled: bool = False):
+    """`prefer_callback_scheduled`, used only by the callback reminder's own
+    stale-check (_create_candidate_callback_reminder_notification_sync):
+    prefers whichever duplicate already carries feedback_type = 'Callback
+    Scheduled' over plain recency (CALLBACK_ROW_TIEBREAKER — see its own
+    module docstring). Every other notification type this function serves
+    (candidate_passed, candidate_rejected, …) has no such status to prefer
+    and keeps the plain recency-only order."""
     job_row = _fetch_job_sync(cur, job_id)
 
+    # sourced_candidates' own unique constraint is (jobdiva_id, candidate_id,
+    # source) — a multi-sourced candidate (JobDiva + LinkedIn + manual, …)
+    # genuinely has more than one row matching candidate_id+jobdiva_id alone.
+    # Without this ordering, an unordered LIMIT 1 could non-deterministically
+    # return a DIFFERENT (stale) row than the one a reschedule/feedback write
+    # just updated — e.g. a candidate_callback_reminder's own stale-reminder
+    # check would then read that stale row's (unchanged) callback_scheduled_
+    # at, wrongly conclude the reminder was superseded, and skip firing it.
+    # Same fix as _resolve_sourced_candidate_row_for_callback's own ORDER BY.
+    order_by = CALLBACK_ROW_TIEBREAKER if prefer_callback_scheduled else "updated_at DESC NULLS LAST, id DESC"
     cur.execute(
-        """
+        f"""
         SELECT name, data
-        FROM sourced_candidates
-        WHERE candidate_id = %s AND jobdiva_id = %s
+        FROM sourced_candidates sc
+        WHERE sc.candidate_id = %s AND sc.jobdiva_id = %s
+        ORDER BY {order_by}
         LIMIT 1
         """,
         (candidate_id, job_row["jobdiva_id"] if job_row else job_id),
@@ -1276,3 +1347,118 @@ async def create_candidate_externally_submitted_notification(
             "create_candidate_externally_submitted_notification_failed candidate=%s job=%s: %s",
             candidate_id, job_id, e, exc_info=True,
         )
+
+
+_TITLE_CALLBACK_REMINDER = "Callback reminder: Call {candidate_name} for {job_title}"
+
+
+def _format_callback_time_utc(callback_at: str) -> str:
+    """"3:30 PM UTC", not a bare "3:30 PM" — callback_at is a UTC ISO
+    string, and formatting it without a zone label (PR #841 review) read as
+    the recruiter's own local time to anyone outside UTC. Builds the
+    leading-zero-stripped hour by hand instead of strftime's "%-I" — that
+    flag is glibc-only and raises on Windows."""
+    dt = datetime.fromisoformat(callback_at.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    time_str = dt.strftime("%I:%M %p").lstrip("0") or "0"
+    return f"{time_str} UTC"
+
+
+def _create_candidate_callback_reminder_notification_sync(
+    job_id: str, candidate_id: str, recruiter_email: str, callback_at: str
+) -> None:
+    recipient = (recruiter_email or "").strip().lower()
+    if not recipient:
+        return
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            job_row, cand_row = _fetch_job_and_candidate(cur, job_id, candidate_id, prefer_callback_scheduled=True)
+            if not job_row or not cand_row:
+                return
+
+            # PR #841 review: a reschedule, or a switch to Submit/Reject/
+            # Unreachable/Allotment Slot Filled after this reminder was
+            # already queued, must not fire a reminder for a callback that
+            # no longer applies. save_candidate_feedback writes the CURRENT
+            # callback's time to callback_scheduled_at on every change
+            # (including clearing it to None for every other feedback type)
+            # — if it no longer matches what THIS reminder was queued for,
+            # this reminder is stale and skipped.
+            current_callback_at = (cand_row.get("data") or {}).get("callback_scheduled_at")
+            if current_callback_at != callback_at:
+                logger.info(
+                    "candidate_callback_reminder_skipped_stale candidate=%s job=%s "
+                    "queued_for=%s current=%s",
+                    candidate_id, job_id, callback_at, current_callback_at,
+                )
+                return
+
+            candidate_name = cand_row.get("name") or "A candidate"
+            job_title = _resolve_job_title(job_row, job_id)
+            try:
+                when_label = _format_callback_time_utc(callback_at)
+            except ValueError:
+                when_label = "shortly"
+            jobdiva_id = job_row.get("jobdiva_id") or job_id
+            app_job_id = job_row.get("job_id") or job_id
+            inserted = _insert_notification(
+                cur,
+                notification_type=CALLBACK_REMINDER_TYPE,
+                # Was conflict_clause=None (bare INSERT): that collided with
+                # uniq_notifications_recipient_candidate_job_type's "once
+                # ever" index, which this type used to fall under — the
+                # FIRST callback reminder a (recipient, candidate, job) combo
+                # ever got would permanently UniqueViolation every later one,
+                # including for a reschedule (confirmed in QA: see
+                # ONCE_EVER_EXCLUDED_TYPES's own comment above). Now scoped
+                # per callback occurrence instead of forever.
+                conflict_clause=_CONFLICT_CALLBACK_REMINDER,
+                recipient_email=recipient,
+                job_id=app_job_id,
+                jobdiva_id=jobdiva_id,
+                candidate_id=candidate_id,
+                title=_TITLE_CALLBACK_REMINDER.format(candidate_name=candidate_name, job_title=job_title),
+                # body stays UTC-labeled, as a plain-text fallback for a
+                # client that doesn't understand metadata.callback_at — the
+                # frontend renders the local-time version of that instead
+                # when it's present (PR review: showing a bare "UTC" time
+                # read as the recruiter's own local time to anyone outside
+                # UTC, e.g. IST).
+                body=f"Scheduled callback at {when_label}.",
+                score=None,
+                metadata={"callback_at": callback_at},
+            )
+            conn.commit()
+            if inserted:
+                logger.info(
+                    "notification_created type=candidate_callback_reminder candidate=%s job=%s recipient=%s",
+                    candidate_id, jobdiva_id, recipient,
+                )
+    finally:
+        conn.close()
+
+
+async def create_candidate_callback_reminder_notification(
+    *, job_id: str, candidate_id: str, recruiter_email: str, callback_at: str
+) -> None:
+    """Fires ~5 minutes before a recruiter's self-scheduled callback time
+    (save_candidate_feedback's 'Callback Scheduled' feedback_type schedules
+    this via task_outbox.add's available_at, not immediately like every
+    other notification in this module).
+
+    Deliberately does NOT swallow its own exceptions the way the rest of
+    this file's create_* functions do — those are fire-and-forget
+    BackgroundTasks where an exception would just be an unhandled task
+    error, but this one runs under task_outbox's relay, which retries a
+    failure up to CANDIDATE_CALLBACK_REMINDER's max_tries. Swallowing here
+    would turn a transient DB blip into a silently-dropped reminder.
+    """
+    if not job_id or not candidate_id or not recruiter_email:
+        return
+    await asyncio.to_thread(
+        _create_candidate_callback_reminder_notification_sync,
+        job_id, candidate_id, recruiter_email, callback_at,
+    )

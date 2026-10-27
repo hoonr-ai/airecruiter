@@ -1042,9 +1042,10 @@ class FakeWorld:
 
     async def run_launch(self, request, *, launch_id=None, run_id=None, side_effects_guard=None,
                          fire_side_effects=True, should_stop=None, provision_inline=True,
-                         claimed_session_id=None, bulk_id_for=None):
+                         claimed_session_id=None, bulk_id_for=None, recruiter_email=None):
         self.launch_calls.append({"ids": list(request.candidate_ids), "launch_id": launch_id,
-                                  "fire_side_effects": fire_side_effects, "provision_inline": provision_inline})
+                                  "fire_side_effects": fire_side_effects, "provision_inline": provision_inline,
+                                  "recruiter_email": recruiter_email})
         sid = claimed_session_id
         ref = request.job_id
         keys = []

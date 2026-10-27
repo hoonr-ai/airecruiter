@@ -101,8 +101,18 @@ class TestFeedbackExistsConditionGeneration:
         assert "sc2" not in cond
         assert "'unreachable'" in cond.lower()
 
+    def test_allotment_slot_filled_uses_exact_match(self):
+        cond = _build_feedback_exists_condition("Allotment Slot Filled")
+        assert "sc2" not in cond
+        assert "'allotment slot filled'" in cond.lower()
+
+    def test_callback_scheduled_uses_exact_match(self):
+        cond = _build_feedback_exists_condition("Callback Scheduled")
+        assert "sc2" not in cond
+        assert "'callback scheduled'" in cond.lower()
+
     def test_action_filters_reference_current_row(self):
-        for value in ["Submit", "Reject", "Unreachable"]:
+        for value in ["Submit", "Reject", "Unreachable", "Allotment Slot Filled", "Callback Scheduled"]:
             cond = _build_feedback_exists_condition(value)
             assert "sc.data" in cond
             assert "sc2" not in cond
@@ -145,7 +155,7 @@ class TestDistinctOnOrdering:
     def test_with_filter_includes_feedback_tiebreaker(self):
         """When a feedback filter IS active, ORDER BY should prefer rows with
         feedback so the displayed row matches the filter result."""
-        for feedback in ["Submit", "Reject", "Unreachable"]:
+        for feedback in ["Submit", "Reject", "Unreachable", "Allotment Slot Filled", "Callback Scheduled"]:
             cond, _ = _build_feedback_filter_condition(feedback)
             cte = _build_full_cte(feedback)
             order_section = cte[cte.find(ORDER_BY):]

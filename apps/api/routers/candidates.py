@@ -7,7 +7,7 @@ import contextlib
 import html
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import httpx
 import os
 import re
@@ -16,6 +16,7 @@ from services.ai_service import ai_service
 from services.jobdiva import jobdiva_service, jobdiva_profile_id
 from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
+from services.sourced_candidate_dedup import CALLBACK_ROW_TIEBREAKER
 from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, title_relevance_gate, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
@@ -38,11 +39,11 @@ from routers.launch_report import _fetch_all_outreach, merge_outreach_payloads
 from services.launched_candidates import count_launched_candidates
 from services.notifications_service import (
     create_candidate_rejected_notifications,
-    create_zero_match_notification,
     create_candidate_internal_review_requested_notification,
     create_candidate_externally_submitted_notification,
 )
 from core.tasks import spawn as _spawn_task
+from core.queue_tasks import ZERO_MATCH_NOTIFICATION
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -194,6 +195,8 @@ def _build_feedback_filter_condition(feedback: Optional[str]) -> tuple[str, str]
         "reject": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
         "rejected": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) LIKE 'reject%')",
         "unreachable": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'unreachable')",
+        "allotment slot filled": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'allotment slot filled')",
+        "callback scheduled": "(sc.data->>'feedback_type' IS NOT NULL AND LOWER(TRIM(sc.data->>'feedback_type')) = 'callback scheduled')",
     }
     predicate = predicates.get(f_lower, "")
     return (f"AND {predicate}", predicate) if predicate else ("", "")
@@ -1092,36 +1095,103 @@ def _record_recruiter_action(user: UserIdentity, action: str, job_ref: Any, **kw
         logger.debug(f"activity {action} not recorded: {exc}")
 
 
+def _enqueue_zero_match_notification_sync(job_id: str, searcher_email: str) -> None:
+    """Durable alternative to a bare core.queue.enqueue() call.
+
+    This used to enqueue ZERO_MATCH_NOTIFICATION straight onto arq's queue
+    (core.queue.enqueue): the instant Redis accepts the job it returns
+    "queued", and from that point on ONLY the arq worker can ever run it —
+    no fallback. services/task_outbox.py's own relay is deliberately
+    hardened against exactly this (see main.py's startup comment: it now
+    runs from BOTH the API's own scheduler and the worker's arq cron,
+    specifically because "a dead/never-deployed arq worker meant NOTHING
+    relayed the outbox" for every task that went through it, PR #856). A
+    bare enqueue() has none of that redundancy — which is exactly why
+    `notifications` has zero rows of type zero_match_warning ever, despite
+    QA genuinely hitting a 0-candidate full search (2026-10-27). Routing
+    through the outbox instead gives this the same dual-relay safety net
+    candidate_callback_reminder already has.
+    """
+    from services import task_outbox
+
+    # Minute-grain, not day-grain (PR review suggested a date.today() key):
+    # notifications_service.py's own docstring for zero_match_warning is
+    # explicit that re-running a tweaked search later and getting 0 again is
+    # "a fresh, separately-worth-notifying result" — the same job-level
+    # dedup shape as pair_launched/recruiter_assigned
+    # (_job_level_duplicate_in_last_minute), which only collapses the exact
+    # same event fired again within about a minute (a client retry or a
+    # race), not every zero-result search by this recruiter on this job for
+    # the rest of the day. This key exists only to stop THIS call path from
+    # double-inserting the outbox row for one retried request; the minute
+    # bucket matches that scope without reintroducing the "only ever once"
+    # behavior the module docstring specifically warns against for this type.
+    dedupe_key = (
+        f"zero_match:{job_id}:{searcher_email}:"
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}"
+    )
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            task_outbox.add(
+                cur, ZERO_MATCH_NOTIFICATION, str(job_id), searcher_email,
+                dedupe_key=dedupe_key,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def _enqueue_zero_match_notification(job_id: str, searcher_email: str) -> None:
+    await asyncio.to_thread(_enqueue_zero_match_notification_sync, job_id, searcher_email)
+
+
 def _maybe_notify_zero_match(
     request: "CandidateSearchRequest",
     criteria: Any,
     summary_event: Dict[str, Any],
     user: UserIdentity,
-    any_source_failed: bool = False,
+    all_sources_failed: bool = False,
 ) -> None:
-    """Fires create_zero_match_notification when a FULL search's terminal
+    """Queues the zero-match notification when a FULL search's terminal
     "summary" event reports total_candidates == 0 — not for a "sample"
     probe (the cheap pre-check the Step-5 UI runs before a recruiter
     approves a full search), where an empty result is a much weaker/
     noisier signal that would false-alarm on routine probes.
 
-    any_source_failed: True if ANY "source_status" event earlier in this
-    same stream reported status == "failed" (see
-    unified_candidate_search.py's emit_source_status). A 0-candidate
-    summary caused by a broken/timed-out source pool is NOT the same
-    signal as a search that genuinely ran clean and found nobody — telling
-    the recruiter to loosen their filters when the real problem is a
-    failed upstream call would be a false alarm, so this suppresses the
-    notification in that case (the stream's own source_status event
-    already surfaces the real failure to the UI).
+    Matches the Step-5 UI's own "No candidates found with the current
+    filters" message: that message reads the same whether every source
+    searched cleanly or one of them errored out, so one failed source among
+    several no longer suppresses this on its own.
+
+    all_sources_failed is narrower: when every attempted source failed, the
+    search couldn't run at all — a 0-candidate summary there means "the
+    search broke", not "nobody matched", and telling the recruiter to
+    loosen their filters would be the wrong advice. That case is still
+    suppressed (its own "source_status" events already surface the real
+    failure to the UI).
 
     Called from stream_candidates() for every "summary" event (there's at
     most one per search, the stream's terminal event) — fire-and-forget via
     core.tasks.spawn so a slow/failed DB write can never stall or break the
     NDJSON stream still being delivered to the client.
+
+    PR review: this still leaves a (much narrower) window — a process crash
+    between the stream emitting its terminal event and the spawned task's
+    own task_outbox insert committing would drop the notification with
+    nothing to retry it, same as the co-recruiter notifications a few
+    screens down in this file that are spawned the same way ("both calls
+    swallow their own errors regardless, so nothing is lost by deferring").
+    Putting the outbox insert on the request's own transaction (the way
+    save_candidate_feedback does for candidate_callback_reminder) would
+    close it, at the cost of making every zero-result search wait on a DB
+    round-trip before the stream can finish — not worth it for a response
+    this infrequent (it fires once per empty search, not once per
+    candidate); the bug this function exists to fix was total, permanent
+    silence from a stale/dead worker, not this far smaller race.
     """
     try:
-        if any_source_failed:
+        if all_sources_failed:
             return
         if str(getattr(criteria, "search_mode", "full")).lower() != "full":
             return
@@ -1132,7 +1202,7 @@ def _maybe_notify_zero_match(
         # closed if spawn itself raises (vs. just the notification call
         # failing once running) — otherwise a never-awaited coroutine would
         # leak and Python would warn about it.
-        coro = create_zero_match_notification(job_id=str(request.job_id), searcher_email=user.email)
+        coro = _enqueue_zero_match_notification(str(request.job_id), user.email)
         try:
             _spawn_task(coro, name="zero_match_notification")
         except Exception:
@@ -1176,18 +1246,22 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         _schedule_cross_submissions(str(request.job_id), criteria)
 
         async def stream_candidates():
-            # Tracks whether any source pool reported status == "failed"
-            # (see unified_candidate_search.py's emit_source_status) before
-            # the terminal "summary" event — passed to _maybe_notify_zero_match
-            # so a broken/timed-out source isn't mistaken for a clean search
-            # that genuinely found nobody.
-            any_source_failed = False
+            # Counts, not a single flag: "all failed" only means something
+            # once at least one source actually reported in. Passed to
+            # _maybe_notify_zero_match on the terminal "summary" event.
+            sources_seen = 0
+            sources_failed = 0
             async with contextlib.aclosing(_search_event_stream(criteria)) as events:
                 async for event in events:
-                    if event.get("type") == "source_status" and (event.get("data") or {}).get("status") == "failed":
-                        any_source_failed = True
+                    if event.get("type") == "source_status":
+                        sources_seen += 1
+                        if (event.get("data") or {}).get("status") == "failed":
+                            sources_failed += 1
                     elif event.get("type") == "summary":
-                        _maybe_notify_zero_match(request, criteria, event, user, any_source_failed)
+                        _maybe_notify_zero_match(
+                            request, criteria, event, user,
+                            all_sources_failed=sources_seen > 0 and sources_failed == sources_seen,
+                        )
                     try:
                         line = json.dumps(event) + "\n"
                     except Exception as e:  # noqa: BLE001 — e.g. a datetime/Decimal value
@@ -1348,239 +1422,6 @@ async def get_jobdiva_criteria_status(
         logger.error(f"criteria-status check failed for job {job_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to check JobDiva criteria status")
 
-@router.post("/candidates/search/legacy")
-async def search_jobdiva_candidates_legacy(
-    request: CandidateSearchRequest,
-    user: UserIdentity = Depends(get_current_user),
-):
-    """
-    Legacy search endpoint (preserved for backward compatibility)
-
-    Enhanced multi-criteria candidate search with separate title, skill, and location filtering.
-
-    TIER 1: JobDiva Job Applicants filtered by titles, skills, and locations
-    TIER 2: TalentSearch Pool filtered by same criteria
-
-    Supports both legacy format (combined skills array) and enhanced format (separate criteria).
-
-    Guarded exactly like its non-legacy twin `/candidates/search`: it burns
-    JobDiva API quota and returns candidate PII, so it can't stay open.
-    """
-    print(f"🔍 Enhanced multi-criteria search for job_id: {request.job_id}")
-
-    if not request.job_id:
-        return {"candidates": [], "message": "jobdiva_id required for candidate search"}
-
-    _verify_job_access_by_id(str(request.job_id), user)
-
-    try:
-        combined_results = []
-        applicant_count = 0
-        talent_pool_count = 0
-
-        # Parse filtering criteria from the rich title/skill/location shapes.
-        # Legacy flat `titles`/`skills` lists were dropped from the request
-        # model; `legacy_skills` stays as a name here purely to preserve the
-        # downstream JobDiva service signature (which still expects a flat list
-        # of {value, priority, years_experience}).
-        title_filters = []
-        skill_filters = []
-        location_filters = []
-        legacy_skills = []
-
-        if request.title_criteria:
-            title_filters = [t for t in request.title_criteria if t.match_type != 'exclude']
-        if request.skill_criteria:
-            skill_filters = [s for s in request.skill_criteria if s.match_type != 'exclude']
-        if request.locations:
-            location_filters = list(request.locations)
-
-        # Derive the flat "legacy_skills" shape from skill_criteria so the old
-        # JobDiva service call still works without requiring callers to send
-        # the deprecated format.
-        for skill in (request.skill_criteria or []):
-            if skill.match_type == 'exclude':
-                continue
-            priority = "Must Have" if skill.match_type == 'must' else "Flexible"
-            legacy_skills.append({
-                "value": skill.value,
-                "priority": priority,
-                "years_experience": skill.years or 0,
-            })
-
-        # Use location from either enhanced or legacy format
-        primary_location = ""
-        if location_filters:
-            primary_location = location_filters[0].value
-        elif request.location:
-            primary_location = request.location
-
-        print(f"📋 Search criteria - Titles: {len(title_filters)}, Skills: {len(skill_filters)}, Locations: {len(location_filters)}")
-
-        # TIER 1: JobDiva Job Applicants with enhanced filtering
-        print("🎯 TIER 1: Searching job applicants with enhanced resume fetching...")
-        try:
-            # For job applicant search, use enhanced method to get full resume text
-            if not title_filters and not skill_filters and not legacy_skills:
-                # Simple applicant search - use enhanced method for complete data
-                print("📝 Using enhanced job applicants method (no complex filters)")
-                applicants = await jobdiva_service.get_enhanced_job_candidates(request.job_id)
-
-                # Filter by location if provided
-                if location_filters or primary_location:
-                    filtered_applicants = []
-                    search_location = location_filters[0].value if location_filters else primary_location
-                    for candidate in applicants:
-                        candidate_location = candidate.get("location", "").lower()
-                        if search_location.lower() in candidate_location or candidate_location in search_location.lower():
-                            filtered_applicants.append(candidate)
-                    applicants = filtered_applicants
-
-            else:
-                # Complex criteria search - use existing enhanced filtering
-                applicants = await jobdiva_service.search_job_candidates_enhanced(
-                    job_id=request.job_id,
-                    title_criteria=title_filters,
-                    skill_criteria=skill_filters,
-                    location_criteria=location_filters,
-                    legacy_skills=legacy_skills  # Fallback to legacy format
-                )
-
-            applicant_count = len(applicants)
-            print(f"✅ Found {applicant_count} job applicants matching criteria")
-
-            # Mark applicants as priority source
-            for candidate in applicants:
-                candidate["source"] = "JobDiva-Applicants"
-                candidate["priority"] = True
-            combined_results.extend(applicants)
-
-        except Exception as e:
-            print(f"⚠️ Job applicants search failed: {e}")
-            # Fallback to legacy search if enhanced search fails
-            try:
-                applicants = await jobdiva_service.search_candidates(
-                    skills=legacy_skills,
-                    location=primary_location,
-                    job_id=request.job_id
-                )
-                applicant_count = len(applicants)
-                for candidate in applicants:
-                    candidate["source"] = "JobDiva-Applicants"
-                    candidate["priority"] = True
-                combined_results.extend(applicants)
-                print(f"✅ Fallback search found {applicant_count} applicants")
-            except Exception as fallback_e:
-                print(f"❌ Fallback search also failed: {fallback_e}")
-                applicant_count = 0
-
-        # TIER 2: TalentSearch Pool with enhanced filtering
-        # Only search if we need more candidates and have search criteria
-        if (title_filters or skill_filters or legacy_skills) and (applicant_count < request.limit):
-            print("🌐 TIER 2: Searching talent pool with multi-criteria filters...")
-            try:
-                remaining_limit = max(0, request.limit - applicant_count)
-
-                talent_pool = await jobdiva_service.search_talent_pool_enhanced(
-                    title_criteria=title_filters,
-                    skill_criteria=skill_filters,
-                    location_criteria=location_filters,
-                    legacy_skills=legacy_skills,
-                    page=request.page,
-                    limit=remaining_limit if remaining_limit > 0 else request.limit
-                )
-                talent_pool_count = len(talent_pool)
-                print(f"✅ Found {talent_pool_count} additional candidates from talent pool")
-
-                # Mark talent pool as secondary source
-                for candidate in talent_pool:
-                    candidate["source"] = "JobDiva-TalentSearch"
-                    candidate["priority"] = False
-                combined_results.extend(talent_pool)
-
-            except Exception as e:
-                print(f"⚠️ Enhanced talent pool search failed: {e}")
-                # Fallback to legacy talent search
-                try:
-                    talent_pool = await jobdiva_service.search_candidates(
-                        skills=legacy_skills,
-                        location=primary_location,
-                        page=request.page,
-                        limit=remaining_limit if remaining_limit > 0 else request.limit,
-                        job_id=None
-                    )
-                    talent_pool_count = len(talent_pool)
-                    for candidate in talent_pool:
-                        candidate["source"] = "JobDiva-TalentSearch"
-                        candidate["priority"] = False
-                    combined_results.extend(talent_pool)
-                    print(f"✅ Fallback talent search found {talent_pool_count} candidates")
-                except Exception as fallback_e:
-                    print(f"❌ Fallback talent search also failed: {fallback_e}")
-                    talent_pool_count = 0
-
-        # Summary
-        total_found = len(combined_results)
-        criteria_summary = []
-        if title_filters: criteria_summary.append(f"{len(title_filters)} title criteria")
-        if skill_filters: criteria_summary.append(f"{len(skill_filters)} skill criteria")
-        if location_filters: criteria_summary.append(f"{len(location_filters)} location criteria")
-
-        message = f"Found {total_found} candidates"
-        if criteria_summary:
-            message += f" matching {', '.join(criteria_summary)}"
-        if applicant_count > 0 and talent_pool_count > 0:
-            message += f" ({applicant_count} job applicants + {talent_pool_count} from talent pool)"
-        elif applicant_count > 0:
-            message += f" ({applicant_count} job applicants)"
-        elif talent_pool_count > 0:
-            message += f" ({talent_pool_count} from talent pool)"
-
-        # Deduplicate candidates by email or name+location
-        print("🔄 Deduplicating candidates...")
-        seen_candidates = {}
-        deduplicated_results = []
-
-        for candidate in combined_results:
-            # Create unique key based on email (preferred) or name+location
-            email_key = candidate.get("email", "").lower().strip()
-            name_location_key = f"{candidate.get('firstName', '').lower()}_{candidate.get('lastName', '').lower()}_{candidate.get('location', '').lower()}"
-
-            # Use email as primary key, fallback to name+location
-            unique_key = email_key if email_key else name_location_key
-
-            if unique_key and unique_key not in seen_candidates:
-                # First time seeing this candidate
-                seen_candidates[unique_key] = candidate
-                deduplicated_results.append(candidate)
-            elif unique_key in seen_candidates:
-                # Duplicate found - prefer JobDiva-Applicants over TalentSearch
-                existing = seen_candidates[unique_key]
-                current_source = candidate.get("source", "")
-                existing_source = existing.get("source", "")
-
-                if current_source == "JobDiva-Applicants" and existing_source != "JobDiva-Applicants":
-                    # Replace with job applicant version (higher priority)
-                    seen_candidates[unique_key] = candidate
-                    # Replace in results list
-                    for i, result in enumerate(deduplicated_results):
-                        if result == existing:
-                            deduplicated_results[i] = candidate
-                            break
-
-        dedup_count = len(combined_results) - len(deduplicated_results)
-        if dedup_count > 0:
-            print(f"🔄 Removed {dedup_count} duplicate candidates")
-            message += f" (removed {dedup_count} duplicates)"
-
-        print(f"🎯 SEARCH COMPLETE: {message}")
-
-        return {"candidates": deduplicated_results, "message": message}
-
-    except Exception as e:
-        print(f"❌ Enhanced candidate search failed: {e}")
-        return {"candidates": [], "message": f"Search failed: {str(e)}"}
-
 @router.post("/candidates/message")
 async def message_candidate(request: CandidateMessageRequest, user: UserIdentity = Depends(get_current_user)):
     """
@@ -1609,13 +1450,36 @@ async def get_job_candidates(
     job_id_or_ref: str,
     limit: Optional[int] = Query(default=None, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    status: Optional[str] = Query(default=None),
     user: UserIdentity = Depends(get_current_user),
 ):
     """
     Fetches all sourced candidates tied to a specific job.
     Supports both numeric job_id and reference jobdiva_id.
+
+    ``status`` (optional) restricts the result to one Rankings STATUS bucket —
+    "pass" / "fail" / "pending" / "in_progress" — filtered in SQL via
+    engage_display_sql() (the same label rule as the header stat and
+    _launched_status_filter below), so pagination and the reported total only
+    ever cover matching candidates instead of the caller filtering whatever
+    page happened to load client-side.
     """
     _verify_job_access_by_id(job_id_or_ref, user)
+    # Tests call this endpoint function directly (bypassing FastAPI's request
+    # parsing) without passing `status`, so it falls back to its raw parameter
+    # default — the Query(default=None) sentinel object itself, not a str —
+    # same as a caller could in principle pass any non-string value here.
+    status_value = status if isinstance(status, str) else None
+    status_value = status_value.strip() if status_value else ""
+    status_label = _LAUNCHED_STATUS_FILTER_LABELS.get(status_value.lower()) if status_value else None
+    if status_value and status_label is None:
+        # An unrecognised value (typo, stale client) is a caller error, not
+        # "no filter" — silently falling back to the unfiltered list would
+        # read as the filter being broken rather than the request being wrong.
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown status filter: {status_value!r}",
+        )
     try:
         from psycopg2.extras import RealDictCursor
 
@@ -1648,12 +1512,78 @@ async def get_job_candidates(
         conn = get_db_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Status-scoped total: when a STATUS filter is active, "total_candidates"
+                # (the pagination total and the "Matching N of total" count) must count
+                # only the matching candidates — duplicate_candidate_count and
+                # invalid_contact_count are separate summary tiles and stay unfiltered.
+                #
+                # The NOT EXISTS clause restricts the FILTER to one row per
+                # candidate_id *within this job* — whichever sourced_candidates
+                # row the dedup below (`ORDER BY candidate_id, created_at DESC,
+                # id DESC`) would also pick as that candidate's row for this
+                # job. Without it, a candidate with several sourced_candidates
+                # rows for this job (re-sourced from a second source, say)
+                # could have one row read Pass and another Pending;
+                # COUNT(...) FILTER evaluates every row, so it would count
+                # that candidate_id as matching even though the single row
+                # the page query returns for them does not, and "Matching N
+                # of total" would read N higher than what ever appears in the
+                # table. The jobdiva_id condition on `newer` matters just as
+                # much as the ordering: the same candidate_id can also carry a
+                # separate, newer row sourced for a *different* job, and that
+                # row must never suppress this one.
+                # "Pending" is format_engage_status()'s catch-all, so it also
+                # matches never-launched candidates (the N/A bucket) — restrict
+                # to the launched population, same definition as
+                # services/launched_candidates.py and the header's own count.
+                _pending_launched_filter = (
+                    " AND (COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''"
+                    " OR EXISTS ("
+                    "SELECT 1 FROM engage_interview_audit ea"
+                    " WHERE ea.candidate_id = sc.candidate_id"
+                    " AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)"
+                    " AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''"
+                    "))"
+                    if status_label == "Pending" else ""
+                )
+                status_total_filter_sql = (
+                    f"""FILTER (
+                        WHERE {engage_display_sql('sc.data')} = %s
+                          AND NOT EXISTS (
+                              SELECT 1 FROM sourced_candidates newer
+                              WHERE newer.candidate_id = sc.candidate_id
+                                AND (newer.jobdiva_id = %s OR newer.jobdiva_id = %s)
+                                AND (newer.created_at, newer.id) > (sc.created_at, sc.id)
+                          )
+                          {_pending_launched_filter}
+                    )""" if status_label else ""
+                )
+                # Built incrementally, in the order each %s appears in the SQL
+                # text below: the status FILTER's own %s sits in the SELECT
+                # list, ahead of the WHERE clause's params, so status_label,
+                # the NOT EXISTS clause's jobdiva_id pair, and (for Pending
+                # only) the launched-check's own jobdiva_id pair all have to
+                # come first here too, in that order.
+                count_params: List[Any] = []
+                if status_label:
+                    count_params.extend([status_label, resolved_jobdiva_id, str(resolved_numeric_job_id)])
+                    if status_label == "Pending":
+                        count_params.extend([resolved_jobdiva_id, str(resolved_numeric_job_id)])
+                count_params.extend([
+                    resolved_jobdiva_id, str(resolved_numeric_job_id),
+                    resolved_jobdiva_id, str(resolved_numeric_job_id),
+                    _TERMINAL_STATUSES,
+                    resolved_jobdiva_id, str(resolved_numeric_job_id),
+                ])
                 cur.execute(
-                    """
+                    f"""
                     SELECT
-                        COUNT(DISTINCT sc.candidate_id) AS total_candidates,
+                        COUNT(DISTINCT sc.candidate_id) {status_total_filter_sql} AS total_candidates,
+                        -- Unfiltered twin of total_candidates — the "Matching N
+                        -- of total" denominator, constant across STATUS buckets.
+                        COUNT(DISTINCT sc.candidate_id) AS job_total_candidates,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
-                            WHERE sc.data->>'_stage' = 'dropped' 
+                            WHERE sc.data->>'_stage' = 'dropped'
                               AND sc.data->>'_drop_reason' = 'cross_source_duplicate'
                         ) AS duplicate_candidate_count,
                         COUNT(DISTINCT sc.candidate_id) FILTER (
@@ -1702,13 +1632,11 @@ async def get_job_candidates(
                           )
                       )
                     """,
-                    (resolved_jobdiva_id, str(resolved_numeric_job_id),
-                     resolved_jobdiva_id, str(resolved_numeric_job_id),
-                     _TERMINAL_STATUSES,
-                     resolved_jobdiva_id, str(resolved_numeric_job_id)),
+                    count_params,
                 )
                 counts_row = cur.fetchone() or {}
                 total_candidates = int(counts_row.get("total_candidates") or 0)
+                job_total_candidates = int(counts_row.get("job_total_candidates") or 0)
                 # UI "Candidates Launched" is candidate grain: one per launched
                 # person, latest interview. It is the SAME population the
                 # outreach-stats header buckets and the launch report are computed
@@ -1720,6 +1648,30 @@ async def get_job_candidates(
                 invalid_contact_count = int(counts_row.get("invalid_contact_count") or 0)
 
                 pagination_clause = ""
+                # Same engage_display_sql() label check as total_candidates above,
+                # applied after dedup so it reads the one row per candidate the
+                # response actually returns — this is what makes "Matching N of
+                # total" and the page contents agree for N > CANDIDATE_PAGE_SIZE.
+                #
+                # Pending's launched-only restriction, same as the count query
+                # above. Deliberately an EXISTS over every audit row, not
+                # `la.interview_id` (this query's own join, the single newest
+                # row only) — a failed relaunch after an earlier success would
+                # leave la.interview_id blank and the two queries would
+                # disagree on this candidate again otherwise.
+                _pending_launched_where = (
+                    " AND (COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''"
+                    " OR EXISTS ("
+                    "SELECT 1 FROM engage_interview_audit ea"
+                    " WHERE ea.candidate_id = sc.candidate_id"
+                    " AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)"
+                    " AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''"
+                    "))"
+                    if status_label == "Pending" else ""
+                )
+                status_where_sql = (
+                    f"WHERE {engage_display_sql('sc.data')} = %s{_pending_launched_where}" if status_label else ""
+                )
                 params: List[Any] = [
                     str(resolved_jobdiva_id),
                     str(resolved_numeric_job_id),
@@ -1730,6 +1682,10 @@ async def get_job_candidates(
                     resolved_jobdiva_id,
                     str(resolved_numeric_job_id),
                 ]
+                if status_label:
+                    params.append(status_label)
+                    if status_label == "Pending":
+                        params.extend([resolved_jobdiva_id, str(resolved_numeric_job_id)])
                 if limit is not None:
                     pagination_clause = " LIMIT %s OFFSET %s"
                     params.extend([int(limit), int(offset)])
@@ -1817,6 +1773,7 @@ async def get_job_candidates(
                         ON cei.candidate_id = sc.candidate_id
                     LEFT JOIN latest_audit la
                         ON la.candidate_id = sc.candidate_id
+                    {status_where_sql}
                     ORDER BY sc.created_at DESC, sc.id DESC
                     {pagination_clause};
                 """,
@@ -2056,6 +2013,8 @@ async def get_job_candidates(
                 "offset": effective_offset,
                 "returned": len(candidates),
                 "total": total_candidates,
+                # Always the whole job's count, unlike "total" above.
+                "job_total": job_total_candidates,
                 "has_more": has_more,
             },
         }
@@ -4872,6 +4831,40 @@ async def get_candidate_filter_options(user: UserIdentity = Depends(get_current_
         logger.error(f"Error fetching candidate filter options: {e}")
         return {"status": "error", "jobs": [], "sources": [], "locations": [], "message": str(e)}
 
+@router.get("/candidates/zip-lookup")
+async def lookup_zip_code(
+    zip_code: str = Query(
+        ...,
+        alias="zip",
+        min_length=5,
+        max_length=5,
+        pattern=r"^\d{5}$",
+        description="5-digit US zip code to validate before adding it to a Step 5 location search",
+    ),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Resolves a zip against the offline zip index (services/zip_index.py)
+    so the Step 5 location input can confirm or reject it before it's added
+    to search criteria. An unresolvable zip (e.g. "99999", outside the real
+    US range) previously made the search's own anchor point fail to
+    geocode, which silently passed every candidate through the location
+    filter unfiltered instead of narrowing results or erroring — this gives
+    the frontend a cheap way to catch that before the search ever runs.
+
+    Always 200 (never 404) on a well-formed-but-unassigned zip — this is a
+    validity CHECK, not a resource fetch, so the response body carries the
+    answer: `{"valid": false}` means "well-formed 5-digit input, not a real
+    US zip," distinct from the 422 FastAPI itself returns for a malformed
+    ``zip`` query param (wrong length, non-digits) via this parameter's own
+    pattern constraint.
+    """
+    from services import zip_index
+    entry = zip_index.lookup_zip(zip_code)
+    if not entry:
+        return {"status": "success", "valid": False}
+    return {"status": "success", "valid": True, "city": entry["city"], "state": entry["state"]}
+
+
 @router.post("/candidates/enhanced-fetch")
 async def fetch_enhanced_candidates(request: Dict[str, str], user: UserIdentity = Depends(get_current_user)):
     """
@@ -5644,6 +5637,67 @@ async def get_candidate_evaluation_report(
     except Exception as e:
         logger.error(f"evaluation-report failed for {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Every UI reason (apps/web/lib/rejection.ts's REJECTION_REASONS) must have an
+# entry here, or selecting it in the Reject-candidate dropdown fails with a
+# 422 on confirm — exactly what happened to the two newest reasons in PR #840,
+# which shipped on the frontend with no matching entry here. Module-level (not
+# rebuilt inside save_candidate_feedback on every request) specifically so
+# tests/test_rejection_reasons_sync.py can import it directly and assert the
+# two lists stay in sync, instead of only finding the next drift in
+# production the way this one was found.
+REJECTION_REASON_TO_JOBDIVA_ACTION = {
+    "Skills do not meet requirements": "PAIR Reject - Skills do not meet requirements",
+    "Communication skills": "PAIR Reject - Communication skills",
+    "Domain experience mismatch": "PAIR Reject - Domain experience mismatch",
+    "More qualified candidates identified": "PAIR Reject - More qualified candidates identified",
+    "Overqualified for the role": "PAIR Reject - Overqualified for the role",
+    "Compensation expectations exceed budget": "PAIR Reject - Compensation expectations exceed budget",
+    "Not aligned with employment type (W2 / C2C / 1099)": "PAIR Reject - Not aligned with employment type (W2 / C2C / 1099)",
+    "Work authorization / visa constraints": "PAIR Reject - Work authorization / visa constraints",
+    "Not comfortable with background check / drug test": "PAIR Reject - Not comfortable with background check / drug test",
+    "Not local and not open to relocation": "PAIR Reject - Not local and not open to relocation",
+    "Open to remote only": "PAIR Reject - Open to remote only",
+    "Not available within required timeline": "PAIR Reject - Not available within required timeline",
+    "Accepted another offer": "PAIR Reject - Accepted another offer",
+    "Candidate withdrew interest": "PAIR Reject - Candidate withdrew interest",
+    "Career gap concern": "PAIR Reject - Career gap concern",
+    "Job Hopping (short-term engagements throughout or in the last 5-7 years)": "PAIR Reject - Job Hopping",
+    "Fake candidate — Multiple profiles/resumes; misrepresentation of past experience": "PAIR Reject - Fake candidate",
+    "Already submitted to same client / hiring manager by another vendor": "PAIR Reject - Already submitted",
+    "Previously rejected by client": "PAIR Reject - Previously rejected by client",
+    "Not eligible for rehire": "PAIR Reject - Not eligible for rehire",
+    "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
+    "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
+    # PR #840 review: these two shipped on the frontend without a matching
+    # entry here, so selecting either one failed with a 422 on confirm.
+    # Distinct from "Already submitted to same client / hiring manager by
+    # another vendor" above — that one is an external vendor conflict; this
+    # is an internal team member conflict — kept as separate action strings
+    # rather than reusing "PAIR Reject - Already submitted" so JobDiva
+    # reporting can tell the two apart.
+    #
+    # NEEDS CONFIRMATION: these two action strings are new and have not been
+    # verified against JobDiva's own configured action list the way every
+    # other entry above presumably was when it first shipped.
+    "Candidate is not interested in the role/job responsibilities": "PAIR Reject - Not interested in role",
+    "Already submitted to the same client/hiring manager by another team member": "PAIR Reject - Already submitted (internal)",
+}
+
+# PR #841 review: bounds on a recruiter-chosen Callback Scheduled time.
+# Below CALLBACK_MIN_LEAD, remind_at (callback_at minus 5 minutes) would
+# already be in the past, so the "reminder" would fire immediately instead
+# of before the call; above CALLBACK_MAX_LEAD there's no real validation
+# value in accepting an arbitrarily distant date.
+CALLBACK_MIN_LEAD = timedelta(minutes=5)
+CALLBACK_MAX_LEAD = timedelta(days=365)
+
+# CALLBACK_ROW_TIEBREAKER (imported above) is shared with notifications_service.py's
+# own callback-reminder stale-check — see sourced_candidate_dedup.py's module
+# docstring for why both sides need to agree on which duplicate row is "the" one.
+
+
 @router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/feedback")
 async def save_candidate_feedback(
     job_id_or_ref: str,
@@ -5688,14 +5742,41 @@ async def save_candidate_feedback(
         if not _manager_email_allowed(manager_email):
             raise HTTPException(status_code=400, detail="manager_email domain is not allowed")
 
+    callback_dt: Optional[datetime] = None
+    if request.feedback_type == "Callback Scheduled":
+        callback_at_raw = (request.callback_at or "").strip()
+        if not callback_at_raw:
+            raise HTTPException(status_code=400, detail="callback_at is required for Callback Scheduled")
+        try:
+            callback_dt = datetime.fromisoformat(callback_at_raw.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="callback_at must be a valid ISO 8601 datetime")
+        if callback_dt.tzinfo is None:
+            callback_dt = callback_dt.replace(tzinfo=timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        if callback_dt <= now_utc:
+            raise HTTPException(status_code=400, detail="callback_at must be in the future")
+        # PR #841 review: under 5 minutes out, remind_at (callback_at - 5min)
+        # is already in the past and the reminder fires immediately rather
+        # than "before" the callback — reject instead of silently doing that.
+        if callback_dt - now_utc < CALLBACK_MIN_LEAD:
+            raise HTTPException(status_code=400, detail="callback_at must be at least 5 minutes in the future")
+        if callback_dt - now_utc > CALLBACK_MAX_LEAD:
+            raise HTTPException(status_code=400, detail="callback_at must be within the next year")
+
     logger.info(
         f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: "
         f"{request.feedback_type} (submission_type={submission_type}, by {user.email})"
     )
     _record_recruiter_action(
         user,
-        {"submit": "feedback_submit", "reject": "feedback_reject", "unreachable": "feedback_unreachable"}.get(
-            str(request.feedback_type or "").strip().lower(), "feedback_other"),
+        {
+            "submit": "feedback_submit",
+            "reject": "feedback_reject",
+            "unreachable": "feedback_unreachable",
+            "allotment slot filled": "feedback_allotment_slot_filled",
+            "callback scheduled": "feedback_callback_scheduled",
+        }.get(str(request.feedback_type or "").strip().lower(), "feedback_other"),
         job_id_or_ref, candidate_id=candidate_id,
         attrs={"submission_type": submission_type} if request.feedback_type == "Submit" else None,
     )
@@ -5705,33 +5786,9 @@ async def save_candidate_feedback(
     if request.feedback_type == "Submit":
         action_string = "PAIR Internal Submission" if submission_type == "internal" else "PAIR External Submission"
     elif request.feedback_type == "Reject":
-        rejection_mapping = {
-            "Skills do not meet requirements": "PAIR Reject - Skills do not meet requirements",
-            "Communication skills": "PAIR Reject - Communication skills",
-            "Domain experience mismatch": "PAIR Reject - Domain experience mismatch",
-            "More qualified candidates identified": "PAIR Reject - More qualified candidates identified",
-            "Overqualified for the role": "PAIR Reject - Overqualified for the role",
-            "Compensation expectations exceed budget": "PAIR Reject - Compensation expectations exceed budget",
-            "Not aligned with employment type (W2 / C2C / 1099)": "PAIR Reject - Not aligned with employment type (W2 / C2C / 1099)",
-            "Work authorization / visa constraints": "PAIR Reject - Work authorization / visa constraints",
-            "Not comfortable with background check / drug test": "PAIR Reject - Not comfortable with background check / drug test",
-            "Not local and not open to relocation": "PAIR Reject - Not local and not open to relocation",
-            "Open to remote only": "PAIR Reject - Open to remote only",
-            "Not available within required timeline": "PAIR Reject - Not available within required timeline",
-            "Accepted another offer": "PAIR Reject - Accepted another offer",
-            "Candidate withdrew interest": "PAIR Reject - Candidate withdrew interest",
-            "Career gap concern": "PAIR Reject - Career gap concern",
-            "Job Hopping (short-term engagements throughout or in the last 5-7 years)": "PAIR Reject - Job Hopping",
-            "Fake candidate — Multiple profiles/resumes; misrepresentation of past experience": "PAIR Reject - Fake candidate",
-            "Already submitted to same client / hiring manager by another vendor": "PAIR Reject - Already submitted",
-            "Previously rejected by client": "PAIR Reject - Previously rejected by client",
-            "Not eligible for rehire": "PAIR Reject - Not eligible for rehire",
-            "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
-            "Candidate does not want to work with the same client": "PAIR Reject - Candidate does not want to work with the same client",
-        }
-        if request.reason and request.reason not in rejection_mapping:
+        if request.reason and request.reason not in REJECTION_REASON_TO_JOBDIVA_ACTION:
             raise HTTPException(status_code=422, detail="Invalid rejection reason provided")
-        action_string = rejection_mapping.get(request.reason, "PAIR Reject")
+        action_string = REJECTION_REASON_TO_JOBDIVA_ACTION.get(request.reason, "PAIR Reject")
     # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
     #    The frontend sends `candidate.id` (integer PK) or `candidate.candidate_id` in the URL.
     #    JobDiva's createCandidateNote requires the real numeric JobDiva candidate ID
@@ -5740,9 +5797,27 @@ async def save_candidate_feedback(
     pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
 
     jd_candidate_id = cand_id_str   # fallback: use whatever was passed
+    # sourced_candidates.candidate_id — the id every OTHER callback lookup
+    # keys on (_fetch_job_and_candidate, _resolve_sourced_candidate_row_for_
+    # callback, list_upcoming_callbacks). Kept distinct from jd_candidate_id
+    # (below, resolved to data_blob["jobdiva_candidate_id"] for an
+    # auto-provisioned candidate) — that id is for JobDiva API calls only;
+    # using it for the callback reminder instead of this one meant the
+    # reminder task could never find the candidate row for any
+    # auto-provisioned candidate, and silently no-op without ever creating
+    # a notification.
+    sc_candidate_id = cand_id_str
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
     app_job_ref = job_id_or_ref      # canonical app job route segment for report links
     sc_row_id = None                 # sourced_candidates.id (PK) once resolved
+    # Set True only if sourced_row_id was given AND actually matched (set
+    # inside the try/except below, which deliberately swallows its own
+    # exceptions — see that except's own comment) — checked once we're past
+    # it (PR #855 review: an explicit pin that doesn't resolve must 404, not
+    # silently fall back to the ambiguous candidate_id/jobdiva_id match,
+    # which could act on a different duplicate than the one the caller
+    # pinned to).
+    sourced_row_pin_matched = False
     jd_profile_id = ""               # JobDiva profile the manager email links to
     candidate_name = "Candidate"
     job_title = "Job"
@@ -5761,37 +5836,57 @@ async def save_candidate_feedback(
         _conn = get_db_connection()
         try:
             with _conn.cursor() as _cur:
-                # Resolve candidate row matching either candidate_id or integer PK id, scoped to job
-                _cur.execute(
-                    """
-                    SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
-                           sc.name, mj.title, mj.customer_name, sc.source
-                    FROM sourced_candidates sc
-                    LEFT JOIN monitored_jobs mj
-                      ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
-                    WHERE (
-                        sc.candidate_id = %s
-                        OR (%s::bigint IS NOT NULL AND sc.id = %s)
+                row = None
+                # When the caller already knows the exact sourced_candidates
+                # row (the Upcoming Callbacks page's Reschedule action, which
+                # got it from list_upcoming_callbacks' own row_id), pin
+                # straight to it — no ambiguity possible, unlike resolving by
+                # candidate_id/jobdiva_id below, which a multi-sourced
+                # candidate's duplicate rows can still tie on even with
+                # CALLBACK_ROW_TIEBREAKER (it narrows the odds, it doesn't
+                # eliminate them). Still scoped to THIS job (PR #855 review,
+                # High: without it, a recruiter with access to job A could
+                # pass a row_id belonging to the same candidate_id's row on
+                # job B and act on a callback they have no access to) and
+                # ordered the same way the ambiguous query below is (PR #855
+                # review, Medium: the LEFT JOIN's `ON a OR b` can still match
+                # more than one monitored_jobs row even once sc.id itself is
+                # pinned, and mj.job_id/title/customer_name feed downstream
+                # notifications/emails).
+                if request.sourced_row_id is not None:
+                    _cur.execute(
+                        f"""
+                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
+                               sc.name, mj.title, mj.customer_name, sc.source
+                        FROM sourced_candidates sc
+                        LEFT JOIN monitored_jobs mj
+                          ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+                        WHERE sc.id = %s AND sc.candidate_id = %s
+                          AND (
+                              sc.jobdiva_id = %s
+                              OR mj.job_id = %s
+                              OR mj.jobdiva_id = %s
+                              OR sc.jobdiva_id IN (
+                                  SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+                              )
+                          )
+                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                        LIMIT 1
+                        """,
+                        (
+                            request.sourced_row_id, cand_id_str,
+                            job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref,
+                        ),
                     )
-                    AND (
-                        sc.jobdiva_id = %s
-                        OR mj.job_id = %s
-                        OR mj.jobdiva_id = %s
-                        OR sc.jobdiva_id IN (
-                            SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
-                        )
-                    )
-                    ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
-                    LIMIT 1
-                    """,
-                    (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref)
-                )
-                row = _cur.fetchone()
+                    row = _cur.fetchone()
+                    sourced_row_pin_matched = row is not None
 
-                # Fallback: if not matched with job scope, try candidate ID alone
+                # Resolve candidate row matching either candidate_id or integer PK id, scoped to job.
+                # Tiebreaker: CALLBACK_ROW_TIEBREAKER (see its own docstring) — keeps a
+                # duplicate-sourced candidate's writes landing on the same physical row.
                 if not row:
                     _cur.execute(
-                        """
+                        f"""
                         SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
                                sc.name, mj.title, mj.customer_name, sc.source
                         FROM sourced_candidates sc
@@ -5801,7 +5896,37 @@ async def save_candidate_feedback(
                             sc.candidate_id = %s
                             OR (%s::bigint IS NOT NULL AND sc.id = %s)
                         )
-                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                        AND (
+                            sc.jobdiva_id = %s
+                            OR mj.job_id = %s
+                            OR mj.jobdiva_id = %s
+                            OR sc.jobdiva_id IN (
+                                SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+                            )
+                        )
+                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST,
+                                 {CALLBACK_ROW_TIEBREAKER}
+                        LIMIT 1
+                        """,
+                        (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref, job_id_or_ref)
+                    )
+                    row = _cur.fetchone()
+
+                # Fallback: if not matched with job scope, try candidate ID alone
+                if not row:
+                    _cur.execute(
+                        f"""
+                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id,
+                               sc.name, mj.title, mj.customer_name, sc.source
+                        FROM sourced_candidates sc
+                        LEFT JOIN monitored_jobs mj
+                          ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+                        WHERE (
+                            sc.candidate_id = %s
+                            OR (%s::bigint IS NOT NULL AND sc.id = %s)
+                        )
+                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST,
+                                 {CALLBACK_ROW_TIEBREAKER}
                         LIMIT 1
                         """,
                         (cand_id_str, pk_val, pk_val)
@@ -5847,6 +5972,15 @@ async def save_candidate_feedback(
         logger.warning(f"⚠️ Could not resolve JobDiva IDs from DB for feedback "
                        f"(candidate_id={candidate_id}, job={job_id_or_ref}): {e}")
 
+    # An explicit pin that didn't resolve (wrong job, stale id, deleted row,
+    # or the lookup itself failed above) must 404 rather than silently fall
+    # back to the ambiguous candidate_id/jobdiva_id match below it — that
+    # could write to a different duplicate than the one the caller pinned to
+    # (PR #855 review). Checked here, outside the try/except above, since
+    # that except deliberately swallows its own exceptions.
+    if request.sourced_row_id is not None and not sourced_row_pin_matched:
+        raise HTTPException(status_code=404, detail="sourced_row_id not found for this candidate and job")
+
     logger.info(f"📝 Resolved → jd_candidate_id={jd_candidate_id}, jd_job_ref={jd_job_ref}, app_job_ref={app_job_ref}, sc_row_id={sc_row_id}")
 
     # 3. Persist feedback locally in sourced_candidates.data (JSONB merge) first.
@@ -5884,24 +6018,105 @@ async def save_candidate_feedback(
                     # unrelated external submission doesn't notify a stale
                     # requester.
                     feedback_data["internal_review_requested_by"] = None
+            elif request.feedback_type == "Callback Scheduled":
+                feedback_data["callback_scheduled_at"] = callback_dt.isoformat()
+                # PR #844 review: a fresh schedule (first time, or a
+                # reschedule after a previously-done one) must clear any
+                # earlier callback_done_at — otherwise list_upcoming_callbacks
+                # (filtered on callback_done_at IS NULL) would silently never
+                # show this new callback, even though a reminder is about to
+                # fire for it.
+                feedback_data["callback_done_at"] = None
+                # True only for an actual Reschedule — changing the time of a
+                # callback that was already active — not a fresh Schedule
+                # (none pending yet, or the previous one was already done).
+                # data_blob is this row's PRE-write data (see its own comment
+                # above). Surfaced by list_upcoming_callbacks for the UI's
+                # Scheduled/Rescheduled badge.
+                #
+                # Read without FOR UPDATE (PR #856 review), so two concurrent
+                # saves for the same row could both read the same prior state
+                # and both compute this the same way. Left as is: the badge
+                # is cosmetic, and adding FOR UPDATE to this SELECT would
+                # also serialize every OTHER feedback_type through the same
+                # lock, for a race that doesn't otherwise corrupt anything
+                # (the UPDATE itself is still a single atomic JSONB merge).
+                feedback_data["callback_is_reschedule"] = bool(
+                    data_blob.get("callback_scheduled_at") and not data_blob.get("callback_done_at")
+                )
+            else:
+                # PR #841 review: without this, callback_scheduled_at from a
+                # prior "Callback Scheduled" survives the JSONB `||` merge
+                # (it only overwrites keys present in this dict) — a later
+                # Submit/Reject/Unreachable/Allotment Slot Filled would still
+                # read as having a callback pending. Explicitly nulling it
+                # here is also what lets the reminder task (see
+                # notifications_service.create_candidate_callback_reminder_notification)
+                # detect a superseded callback and skip a stale reminder.
+                feedback_data["callback_scheduled_at"] = None
+                # Same reasoning as callback_scheduled_at just above: once
+                # this status moves on, callback_is_reschedule is stale data,
+                # not just unused — a later fresh Schedule shouldn't inherit
+                # whatever this field happened to say before.
+                feedback_data["callback_is_reschedule"] = None
             feedback_payload = json.dumps(feedback_data)
             if sc_row_id is not None:
-                # Fast path: update exactly the row we resolved
+                # Fast path: update exactly the row we resolved. updated_at
+                # is set explicitly (PR #851 review) — there is no trigger
+                # on this table bumping it automatically, and
+                # notifications_service._fetch_job_and_candidate orders a
+                # multi-sourced candidate's duplicate rows by updated_at to
+                # find the one this write just touched; without this, that
+                # ordering would reflect whatever the sync pipeline last
+                # touched instead of this feedback write.
                 _cur2.execute(
-                    "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
+                    "UPDATE sourced_candidates SET data = data || %s::jsonb, updated_at = now() WHERE id = %s",
                     (feedback_payload, sc_row_id)
                 )
             else:
                 # Fallback: match by candidate_id + job ref
                 _cur2.execute(
                     """UPDATE sourced_candidates
-                          SET data = data || %s::jsonb
+                          SET data = data || %s::jsonb, updated_at = now()
                         WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
                           AND (jobdiva_id = %s
                                OR jobdiva_id IN (
                                      SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
                                ))""",
                     (feedback_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
+                )
+            if request.feedback_type == "Callback Scheduled":
+                # Queued on this same cursor/transaction (see task_outbox's own
+                # docstring) so the reminder and the feedback write commit or
+                # roll back together — a DB failure here must not leave a
+                # recruiter believing a callback was scheduled when no
+                # reminder will ever fire.
+                from services import task_outbox
+                from core.queue_tasks import CANDIDATE_CALLBACK_REMINDER
+
+                remind_at = callback_dt - timedelta(minutes=5)
+                task_outbox.add(
+                    _cur2,
+                    CANDIDATE_CALLBACK_REMINDER,
+                    str(app_job_ref or job_id_or_ref),
+                    # sc_candidate_id (sourced_candidates.candidate_id), not
+                    # jd_candidate_id (JobDiva's own id): the task's own
+                    # candidate lookup keys on the former, so passing the
+                    # latter silently no-opped whenever they differ.
+                    sc_candidate_id,
+                    user.email,
+                    callback_dt.isoformat(),
+                    available_at=remind_at,
+                    # Still keyed on jd_candidate_id, unchanged from before
+                    # this fix — a dedupe key only needs to be stable, not
+                    # correct, and switching it to sc_candidate_id here too
+                    # would change the key's shape for exactly the
+                    # candidates this fix affects, so a reminder already
+                    # queued (pre-deploy) under the old key would no longer
+                    # dedupe against one queued fresh (post-deploy) for the
+                    # same re-saved callback, and the recruiter could get it
+                    # twice.
+                    dedupe_key=f"callback_reminder:{jd_candidate_id}:{job_id_or_ref}:{callback_dt.isoformat()}",
                 )
             _conn2.commit()
         _conn2.close()
@@ -5940,7 +6155,12 @@ async def save_candidate_feedback(
             background_tasks.add_task(
                 create_candidate_internal_review_requested_notification,
                 job_id=str(app_job_ref or job_id_or_ref),
-                candidate_id=jd_candidate_id,
+                # sc_candidate_id, not jd_candidate_id — this notification's
+                # own candidate lookup (_fetch_job_and_candidate) matches on
+                # sourced_candidates.candidate_id, not JobDiva's candidate
+                # id, which the two can differ on for an auto-provisioned
+                # candidate (same bug as the callback reminder above).
+                candidate_id=sc_candidate_id,
                 manager_email=manager_email,
             )
         elif submission_type == "external":
@@ -5965,14 +6185,18 @@ async def save_candidate_feedback(
                 background_tasks.add_task(
                     create_candidate_externally_submitted_notification,
                     job_id=str(app_job_ref or job_id_or_ref),
-                    candidate_id=jd_candidate_id,
+                    # sc_candidate_id — see the internal-review notification
+                    # above for why jd_candidate_id is wrong here.
+                    candidate_id=sc_candidate_id,
                     recipient_email=prior_requested_by,
                 )
     elif request.feedback_type == "Reject":
         background_tasks.add_task(
             create_candidate_rejected_notifications,
             job_id=str(app_job_ref or job_id_or_ref),
-            candidate_id=jd_candidate_id,
+            # sc_candidate_id — see the internal-review notification above
+            # for why jd_candidate_id is wrong here.
+            candidate_id=sc_candidate_id,
             rejecter_email=user.email,
         )
 
@@ -5984,8 +6208,8 @@ async def save_candidate_feedback(
     report_link = candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
     safe_report_link = html.escape(report_link, quote=True)
 
-    if request.feedback_type == "Unreachable":
-        logger.info("ℹ️ Skipping JobDiva note for 'Unreachable' status.")
+    if request.feedback_type in ("Unreachable", "Allotment Slot Filled", "Callback Scheduled"):
+        logger.info("ℹ️ Skipping JobDiva note for '%s' status.", request.feedback_type)
         jobdiva_result = {"status": "success"}
     else:
         jobdiva_result = await jobdiva_service.create_candidate_note(
@@ -6088,3 +6312,287 @@ async def save_candidate_feedback(
         "feedback_completed": (feedback_metrics or {}).get("feedback_completed"),
         "pair_submits": (feedback_metrics or {}).get("pair_submits"),
     }
+
+
+def _normalize_optional_row_id(value: Any) -> Optional[int]:
+    """A direct (non-HTTP) call to an endpoint with a Query(None, ...)
+    parameter — as both pg-backed test suites for these two endpoints make —
+    gets the raw Query sentinel object as its default, not None (same
+    pattern as get_job_candidates' own status param)."""
+    return value if isinstance(value, int) else None
+
+
+def _resolve_sourced_candidate_row_for_callback(
+    cur, job_id_or_ref: str, candidate_id: str, row_id: Optional[int] = None
+) -> Optional[Tuple[int, Dict[str, Any]]]:
+    """Finds the (sourced_candidates.id, data) for (job_id_or_ref,
+    candidate_id), the same candidate_id-or-integer-PK / job-scoped match
+    save_candidate_feedback uses to resolve a row — but without that
+    function's JobDiva-ID resolution (customer_name, numeric JobDiva job
+    ref, etc.), which mark_candidate_callback_done has no use for since it
+    never calls JobDiva. Returns None if no row matches.
+
+    PR #844 review: the LEFT JOIN's `ON a OR b` can match more than one
+    monitored_jobs row for a candidate posted to multiple jobs with the same
+    jobdiva_id. Tiebreaker: CALLBACK_ROW_TIEBREAKER (see its own docstring)
+    — makes the pick both deterministic and, unlike ordering on updated_at
+    alone, stable across calls for a multi-sourced candidate.
+
+    `row_id`, when given (the Upcoming Callbacks page sends the row_id it
+    got from list_upcoming_callbacks), pins straight to that exact row — no
+    ambiguity possible, unlike the candidate_id/jobdiva_id match below, which
+    a multi-sourced candidate's duplicate rows can still tie on even with the
+    tiebreaker (it narrows the odds, it doesn't eliminate them). Still scoped
+    to job_id_or_ref (PR #855 review, High: without it, a recruiter with
+    access to one job could pass a row_id belonging to the same
+    candidate_id's row on a DIFFERENT job they have no access to and act on
+    its callback) — matches the same job clause as the fallback query below.
+    Returns None (the caller 404s) rather than falling through to that
+    ambiguous match if an explicit pin doesn't resolve — a stale/wrong id
+    silently falling back could act on a different duplicate than the one
+    the caller pinned to."""
+    cand_id_str = str(candidate_id).strip()
+    pk_val = int(cand_id_str) if (cand_id_str.isascii() and cand_id_str.isdigit() and len(cand_id_str) <= 18) else None
+    if row_id is not None:
+        cur.execute(
+            """
+            SELECT sc.id, sc.data
+            FROM sourced_candidates sc
+            LEFT JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+            WHERE sc.id = %s AND sc.candidate_id = %s
+              AND (mj.job_id = %s OR mj.jobdiva_id = %s OR sc.jobdiva_id = %s)
+            LIMIT 1
+            """,
+            (row_id, cand_id_str, job_id_or_ref, job_id_or_ref, job_id_or_ref),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        data = row[1] if isinstance(row[1], dict) else _json_load_safe(row[1], {})
+        return row[0], data
+    cur.execute(
+        f"""
+        SELECT sc.id, sc.data
+        FROM sourced_candidates sc
+        LEFT JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+        WHERE (sc.candidate_id = %s OR (%s::bigint IS NOT NULL AND sc.id = %s))
+          AND (mj.job_id = %s OR mj.jobdiva_id = %s OR sc.jobdiva_id = %s)
+        ORDER BY {CALLBACK_ROW_TIEBREAKER}
+        LIMIT 1
+        """,
+        (cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    data = row[1] if isinstance(row[1], dict) else _json_load_safe(row[1], {})
+    return row[0], data
+
+
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/callback/done")
+async def mark_candidate_callback_done(
+    job_id_or_ref: str,
+    candidate_id: str,
+    row_id: Optional[int] = Query(None, description="sourced_candidates.id from list_upcoming_callbacks' own row_id, to target an exact duplicate row unambiguously."),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Clears a scheduled callback from the Upcoming Callbacks list.
+
+    Deliberately NOT a feedback_type change: the callback itself isn't an
+    outcome, the conversation it leads to still ends in Submit/Reject/
+    Unreachable, recorded separately from Rankings exactly as today. This
+    only sets callback_done_at — no JobDiva note, no change to the
+    candidate's Submit/Reject/Unreachable status, no notification.
+
+    A no-op (200, not an error) when the row is already marked done or the
+    status has since moved on from "Callback Scheduled" (e.g. the recruiter
+    went to Rankings and rejected the candidate before coming back to this
+    list) — either way there's nothing left for this action to clear. The
+    UPDATE itself is scoped to feedback_type (same LOWER(TRIM(...)) match as
+    list_upcoming_callbacks' own filter, PR review — an exact-string match
+    here could silently no-op on a row the list still shows, for any
+    differently-cased or whitespace-padded value) so that's an atomic
+    guarantee, not just this docstring's promise.
+
+    Ownership scoping matches list_upcoming_callbacks (submitted_by ==
+    user.email): a non-admin recruiter who isn't the one who scheduled it
+    gets 403 rather than silently clearing someone else's callback.
+    """
+    _verify_job_access_by_id(job_id_or_ref, user)
+    row_id = _normalize_optional_row_id(row_id)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            resolved = _resolve_sourced_candidate_row_for_callback(cur, job_id_or_ref, candidate_id, row_id)
+            if resolved is None:
+                raise HTTPException(status_code=404, detail="Candidate not found for this job")
+            sc_row_id, data = resolved
+            submitted_by = str(data.get("submitted_by") or "").strip().lower()
+            if not user.is_admin and submitted_by and submitted_by != (user.email or "").strip().lower():
+                raise HTTPException(status_code=403, detail="This callback was scheduled by another recruiter")
+            cur.execute(
+                """
+                UPDATE sourced_candidates
+                SET data = data || %s::jsonb, updated_at = now()
+                WHERE id = %s AND LOWER(TRIM(data->>'feedback_type')) = 'callback scheduled'
+                """,
+                (json.dumps({"callback_done_at": datetime.now(timezone.utc).isoformat()}), sc_row_id),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return {"status": "success"}
+
+
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/callback/cancel")
+async def cancel_candidate_callback(
+    job_id_or_ref: str,
+    candidate_id: str,
+    row_id: Optional[int] = Query(None, description="sourced_candidates.id from list_upcoming_callbacks' own row_id, to target an exact duplicate row unambiguously."),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Cancels a scheduled callback outright — "I'm not calling this person
+    back after all" — as opposed to /callback/done ("I called them; the
+    callback itself is over"). Unlike /callback/done, this clears
+    feedback_type back to unset, returning the candidate to the same
+    no-feedback-yet state as before "Callback Scheduled" was ever chosen,
+    rather than leaving that status with nothing actually scheduled.
+
+    No separate outbox cancellation needed: once callback_scheduled_at is
+    gone, notifications_service's own stale-reminder check skips firing the
+    already-queued reminder.
+
+    Same ownership scoping and feedback_type match as /callback/done (see
+    its docstring) — a no-op (200) if the row has already moved off
+    "Callback Scheduled".
+    """
+    _verify_job_access_by_id(job_id_or_ref, user)
+    row_id = _normalize_optional_row_id(row_id)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            resolved = _resolve_sourced_candidate_row_for_callback(cur, job_id_or_ref, candidate_id, row_id)
+            if resolved is None:
+                raise HTTPException(status_code=404, detail="Candidate not found for this job")
+            sc_row_id, data = resolved
+            submitted_by = str(data.get("submitted_by") or "").strip().lower()
+            if not user.is_admin and submitted_by and submitted_by != (user.email or "").strip().lower():
+                raise HTTPException(status_code=403, detail="This callback was scheduled by another recruiter")
+            cur.execute(
+                """
+                UPDATE sourced_candidates
+                SET data = data || %s::jsonb, updated_at = now()
+                WHERE id = %s AND LOWER(TRIM(data->>'feedback_type')) = 'callback scheduled'
+                """,
+                (json.dumps({
+                    "feedback_type": None,
+                    "callback_scheduled_at": None,
+                    "callback_done_at": None,
+                }), sc_row_id),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return {"status": "success"}
+
+
+@router.get("/candidates/callbacks/upcoming")
+async def list_upcoming_callbacks(user: UserIdentity = Depends(get_current_user)):
+    """Every "Callback Scheduled" candidate still pending, PLUS one marked
+    done in the last 24h, scoped to the recruiter who scheduled it — the
+    same scoping as the reminder notification itself (recruiter_email, not
+    the job's whole recruiter_emails list), so this list only ever shows
+    callbacks THIS recruiter is personally on the hook for.
+
+    Includes overdue callbacks (callback_scheduled_at already in the past,
+    still not marked done) rather than cutting them off at "now" — the
+    point of this list is "what do I still need to call," and a missed
+    callback is exactly that, not something to quietly drop.
+
+    The 24h-done window (PR review: Mark Done "erasing" the row) exists so a
+    row the recruiter just marked done keeps showing its "Marked as done"
+    state across a page refresh, not just for the current in-memory session
+    — the frontend tells a server-known done row apart from a pending one
+    via this response's own callback_done_at, rather than only its local
+    doneKeys set. A done row older than 24h drops off entirely; marking
+    done doesn't delete anything (callback_done_at just gets set, same as
+    before), it's just no longer returned here.
+
+    Sorted soonest-first; grouping into Today/Tomorrow/dated sections and
+    the "in 45 min" / "overdue" relative labels are display concerns, left
+    to the frontend rather than duplicated here.
+    """
+    from psycopg2.extras import RealDictCursor
+
+    recipient = (user.email or "").strip().lower()
+    if not recipient:
+        return {"status": "success", "callbacks": []}
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # The regex-guarded CASE around each ::timestamptz cast (PR
+            # review) keeps one row with a malformed timestamp from
+            # throwing and failing this whole query for the recruiter — a
+            # non-matching value reads as "not done" / sorts last, instead
+            # of a 500.
+            cur.execute(
+                r"""
+                SELECT sc.id, sc.candidate_id, sc.name, sc.data,
+                       mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name
+                FROM sourced_candidates sc
+                JOIN monitored_jobs mj ON mj.jobdiva_id = sc.jobdiva_id
+                WHERE LOWER(TRIM(sc.data->>'feedback_type')) = 'callback scheduled'
+                  AND LOWER(TRIM(sc.data->>'submitted_by')) = %s
+                  AND sc.data->>'callback_scheduled_at' IS NOT NULL
+                  AND (
+                      sc.data->>'callback_done_at' IS NULL
+                      OR CASE
+                           WHEN sc.data->>'callback_done_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
+                           THEN (sc.data->>'callback_done_at')::timestamptz > now() - interval '24 hours'
+                           ELSE FALSE
+                         END
+                  )
+                ORDER BY CASE
+                           WHEN sc.data->>'callback_scheduled_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
+                           THEN (sc.data->>'callback_scheduled_at')::timestamptz
+                           ELSE 'infinity'::timestamptz
+                         END ASC
+                """,
+                (recipient,),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    callbacks = []
+    for row in rows:
+        data = row.get("data") if isinstance(row.get("data"), dict) else _json_load_safe(row.get("data"), {})
+        callback_at = data.get("callback_scheduled_at")
+        if not callback_at:
+            continue
+        callbacks.append({
+            # sourced_candidates.id — the one truly unique identifier for
+            # this row. candidate_id + job_id alone are NOT unique: a
+            # multi-sourced candidate (JobDiva + LinkedIn + manual, …) can
+            # have more than one sourced_candidates row sharing both, which
+            # without this would give two or more of this response's
+            # entries the IDENTICAL frontend key, and no way for Reschedule/
+            # Mark Done/Cancel to target the specific one the recruiter is
+            # actually looking at.
+            "row_id": row.get("id"),
+            "candidate_id": row.get("candidate_id"),
+            "candidate_name": row.get("name") or "A candidate",
+            "job_id": row.get("job_id") or row.get("jobdiva_id"),
+            "jobdiva_id": row.get("jobdiva_id"),
+            "job_title": row.get("enhanced_title") or row.get("title") or "this job",
+            "customer_name": row.get("customer_name"),
+            "callback_at": callback_at,
+            "callback_done_at": data.get("callback_done_at"),
+            # Set by save_candidate_feedback (see its own comment) — lets the
+            # UI show a Reschedule differently from a fresh Schedule. Absent
+            # on a row written before this field shipped, so default False
+            # (reads as "a fresh schedule") rather than crashing the list.
+            "is_reschedule": bool(data.get("callback_is_reschedule", False)),
+        })
+    return {"status": "success", "callbacks": callbacks}

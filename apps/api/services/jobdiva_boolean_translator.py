@@ -56,6 +56,26 @@ _LOCATION_CLAUSE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# The whole multi-chip group Step 5 emits for 2+ locations: one location
+# clause, then one-or-more more joined by OR, in one parenthesized group.
+# Matched as a single unit — unlike _LOCATION_CLAUSE_RE taken clause-by-
+# clause, which would leave a stray "( OR )" behind once every clause
+# inside is removed.
+_LOCATION_OR_GROUP_CORE = (
+    r'\(\s*"[^"]+"\s+within\s+\d+\s*mi'
+    r'(?:\s+OR\s+"[^"]+"\s+within\s+\d+\s*mi)+\s*\)'
+)
+# Tried in order, same shape as _strip_location_from_boolean's own pattern
+# list: the group can be glued to the rest of the boolean on either side
+# (" AND (group)" mid/tail, "(group) AND " when it opens the boolean), or
+# stand alone — only one of these actually matches a given boolean, so the
+# first substitution that changes the string is the right one.
+_LOCATION_OR_GROUP_PATTERNS = [
+    re.compile(rf'\s+AND\s+{_LOCATION_OR_GROUP_CORE}', flags=re.IGNORECASE),
+    re.compile(rf'{_LOCATION_OR_GROUP_CORE}\s+AND\s+', flags=re.IGNORECASE),
+    re.compile(_LOCATION_OR_GROUP_CORE, flags=re.IGNORECASE),
+]
+
 
 def count_location_clauses(boolean_str: str) -> int:
     """Number of `"..." within N mi` location clauses in the boolean.
@@ -67,6 +87,27 @@ def count_location_clauses(boolean_str: str) -> int:
     if not boolean_str or '"' not in boolean_str:
         return 0
     return len(_LOCATION_CLAUSE_RE.findall(boolean_str))
+
+
+def strip_multi_location_or_group(boolean_str: str) -> str:
+    """Remove the whole multi-chip `("A" within N mi OR "B" within N mi ...)`
+    group Step 5 emits for 2+ locations, keeping everything else — skills,
+    titles, companies, excludes, any hand-edit a recruiter made — untouched.
+
+    Used when a per-location JobDiva search needs the recruiter's own
+    boolean without its multi-chip OR text conflicting with that one
+    location's own zip+radius anchor (see count_location_clauses). Returns
+    the input unchanged (not a best-effort partial strip) when no such
+    group is found, so a caller can tell "nothing to strip" from "stripped
+    down to nothing" and fall back accordingly.
+    """
+    if not boolean_str or '"' not in boolean_str:
+        return boolean_str
+    for pattern in _LOCATION_OR_GROUP_PATTERNS:
+        stripped = pattern.sub("", boolean_str)
+        if stripped != boolean_str:
+            return re.sub(r"\s+", " ", stripped).strip()
+    return boolean_str
 
 
 def rewrite_location_clauses_to_zip_dialect(boolean_str: str) -> str:

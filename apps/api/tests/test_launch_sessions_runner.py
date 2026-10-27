@@ -72,6 +72,8 @@ def test_full_search_session_runs_every_stage_to_completed():
     assert all(b == launching.bulk_id_for(sid, 1, rec["batch"]) for b, rec in s["checkpoint"]["s7"]["inflight"].items())
     # run_launch never fires side effects or provisions inline for a session.
     assert world.launch_calls and all(not c["fire_side_effects"] and not c["provision_inline"] for c in world.launch_calls)
+    # The session's requester rides to Pairbot as recruiter_email.
+    assert all(c["recruiter_email"] == "r@x.com" for c in world.launch_calls)
     # S7b provisioned the launched rows; S8 fired the side effects ONCE.
     assert sorted(sum(world.provision_calls, [])) == ["c1", "c2", "c4"]
     assert len(world.side_effects) == 1

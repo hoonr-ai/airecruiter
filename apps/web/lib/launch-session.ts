@@ -347,6 +347,7 @@ export interface LaunchOptionsBody {
   is_initial_launch: boolean;
   job_board_ids: string[];
   batch_size: number;
+  recruiter_handoff: boolean;
 }
 
 /** What runLaunchPair passes to /engage/launch today (a retry turns every side effect off). */
@@ -355,6 +356,7 @@ export function buildLaunchOptions(args: {
   isRetry?: boolean;
   jobBoardIds: readonly string[];
   batchSize: number;
+  recruiterHandoff?: boolean;
 }): LaunchOptionsBody {
   const retry = Boolean(args.isRetry);
   return {
@@ -363,6 +365,7 @@ export function buildLaunchOptions(args: {
     send_job_posting_email: args.jobBoardIds.length > 0 && !retry,
     job_board_ids: [...args.jobBoardIds],
     batch_size: args.batchSize,
+    recruiter_handoff: Boolean(args.recruiterHandoff),
   };
 }
 
