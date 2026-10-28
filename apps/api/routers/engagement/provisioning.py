@@ -206,6 +206,56 @@ def _select_pass_email_resume(
     return "", False
 
 
+async def _resolve_pass_email_resume_attachment(
+    jobdiva_service,
+    jd_resume_id: Optional[str],
+    used_local_resume_fallback: bool,
+    resume_text: str,
+    candidate_name: Optional[str],
+    job_id: str,
+) -> Tuple[Optional[bytes], Optional[str], Optional[str], bool]:
+    """Decide what to attach to the Candidate Passed email.
+
+    Prefers the resume exactly as submitted to JobDiva (the same file its own
+    "Open Resume" button downloads); falls back to a generated .doc built
+    from parsed resume text when the original file isn't available (e.g. a
+    locally-sourced candidate with no JobDiva resume, or JobDiva returning
+    nothing usable for `jd_resume_id`).
+
+    Returns ``(resume_bytes, resume_filename, resume_content_type, is_original_file)``.
+    """
+    resume_bytes = None
+    resume_filename = None
+    resume_content_type = None
+
+    if not used_local_resume_fallback and jd_resume_id:
+        try:
+            resume_file = await jobdiva_service.get_resume_file(jd_resume_id)
+        except Exception as file_err:
+            resume_file = None
+            logger.warning(
+                "Failed to fetch original resume file for resume_id %s: %s",
+                jd_resume_id,
+                file_err,
+            )
+        if resume_file and resume_file.get("content"):
+            resume_bytes = resume_file["content"]
+            resume_filename = resume_file["filename"]
+            resume_content_type = mimetypes.guess_type(resume_filename)[0] or "application/octet-stream"
+
+    resume_is_original_file = bool(resume_bytes)
+
+    if not resume_bytes and (resume_text or "").strip():
+        resume_bytes = _build_word_resume_document(candidate_name or "Candidate", resume_text)
+        safe_name = "".join(
+            c for c in (candidate_name or "Candidate") if c.isalnum() or c in (" ", "-", "_")
+        ).strip().replace(" ", "_")
+        resume_filename = f"Resume_{safe_name}_{job_id}.doc"
+        resume_content_type = "application/msword"
+
+    return resume_bytes, resume_filename, resume_content_type, resume_is_original_file
+
+
 async def _resolve_provisioning_job_ids(job_id_internal: str):
     """Resolve (numeric_job_id, ref_job_id) from either form of the job identifier.
     Returns (None, None) if the job is not found.
@@ -1084,10 +1134,9 @@ async def _check_and_fire_candidate_passed_notification(
                 })
 
 
-        # 6. Prepare attachment (resume text as Word-compatible .doc fallback)
-        resume_bytes = None
-        resume_filename = None
-
+        # 6. Prepare attachment (original resume file, falling back to a
+        # Word-compatible .doc built from parsed text — see
+        # _resolve_pass_email_resume_attachment below).
         # Reuse the same quality gate as the View Resume endpoint:
         # attach only real JobDiva resume text, skip placeholder/generated text.
         blocked_resume_markers = (
@@ -1125,32 +1174,16 @@ async def _check_and_fire_candidate_passed_notification(
                 job_id,
             )
 
-        resume_content_type = None
-
         # Attach the resume exactly as submitted (the same file JobDiva's own
         # "Open Resume" button downloads — usually a PDF) instead of a plain
-        # text reconstruction, whenever we have a real JobDiva resume to point at.
-        if not used_local_resume_fallback and jd_resume_id:
-            try:
-                resume_file = await jobdiva_service.get_resume_file(jd_resume_id)
-            except Exception as file_err:
-                resume_file = None
-                logger.warning(
-                    "Failed to fetch original resume file for resume_id %s: %s",
-                    jd_resume_id,
-                    file_err,
-                )
-            if resume_file and resume_file.get("content"):
-                resume_bytes = resume_file["content"]
-                resume_filename = resume_file["filename"]
-                resume_content_type = mimetypes.guess_type(resume_filename)[0] or "application/octet-stream"
-
-        if resume_bytes is None and (resume_text or "").strip():
-            resume_bytes = _build_word_resume_document(cand_row["name"] or "Candidate", resume_text)
-            # Try to get name from candidate
-            safe_name = "".join(c for c in (cand_row["name"] or "Candidate") if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
-            resume_filename = f"Resume_{safe_name}_{job_id}.doc"
-            resume_content_type = "application/msword"
+        # text reconstruction, whenever we have a real JobDiva resume to point at;
+        # falls back to a generated .doc otherwise.
+        resume_bytes, resume_filename, resume_content_type, resume_is_original_file = (
+            await _resolve_pass_email_resume_attachment(
+                jobdiva_service, jd_resume_id, used_local_resume_fallback, resume_text,
+                cand_row["name"], job_id,
+            )
+        )
         
         app_job_id = str(job_row.get("job_id") or job_id)
 
@@ -1182,6 +1215,7 @@ async def _check_and_fire_candidate_passed_notification(
             resume_bytes=resume_bytes,
             resume_filename=resume_filename,
             resume_content_type=resume_content_type,
+            resume_is_original_file=resume_is_original_file,
             candidate_id=candidate_id,
             job_id=app_job_id,
             jobdiva_candidate_id=jd_profile_id,

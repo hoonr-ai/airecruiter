@@ -707,6 +707,7 @@ def notify_candidate_passed(
     resume_bytes: Optional[bytes] = None,
     resume_filename: Optional[str] = None,
     resume_content_type: Optional[str] = None,
+    resume_is_original_file: bool = False,
     candidate_id: str = "",
     job_id: str = "",
     app_base_url: Optional[str] = None,
@@ -947,7 +948,11 @@ def notify_candidate_passed(
 
     <div style="background:#fff7ed;border:1px solid #ffedd5;border-radius:8px;padding:12px;">
       <p style="margin:0;font-size:12px;color:#9a3412;line-height:1.5;">
-        <strong>Note:</strong> The candidate's resume is attached as submitted (if available in JobDiva).
+        <strong>Note:</strong> {
+          "The candidate's resume is attached as submitted (if available in JobDiva)."
+          if resume_is_original_file else
+          "The candidate's resume is attached as a formatted document generated from JobDiva's parsed resume text (original file unavailable)."
+        }
       </p>
     </div>
     """
