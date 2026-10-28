@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import binascii
 import functools
 import http.cookiejar
 import inspect
@@ -1515,6 +1516,31 @@ def normalize_employment_type(emp_type: str) -> str:
     
     # Return original if no mapping found
     return emp_type
+
+
+# Guardrails for forwarding a JobDiva-supplied resume FILE (not parsed text)
+# straight into a recruiter email attachment: the filename and bytes come
+# from an external system and must not be trusted as-is.
+_ALLOWED_RESUME_EXTENSIONS = {".pdf", ".doc", ".docx", ".rtf", ".txt"}
+_MAX_RESUME_ATTACHMENT_BYTES = 3 * 1024 * 1024  # ~Graph API attachment ceiling
+_SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9 ._()\-]")
+
+
+def _sanitize_resume_filename(raw_filename: str, max_length: int = 150) -> str:
+    """Make an externally-supplied filename safe to use as an email attachment name.
+
+    Strips any path component, control characters, and anything outside a
+    conservative allowlist, then caps the length (preserving the extension).
+    """
+    name = os.path.basename((raw_filename or "").strip().replace("\\", "/"))
+    name = _SAFE_FILENAME_CHARS.sub("_", name).strip(" ._") or "resume"
+
+    if len(name) > max_length:
+        stem, ext = os.path.splitext(name)
+        name = stem[: max(1, max_length - len(ext))] + ext
+
+    return name
+
 
 class JobDivaService:
     def _extract_customer_from_description(self, description: str) -> str:
@@ -3803,9 +3829,83 @@ class JobDivaService:
         candidate_info["resume_text"] = resume_text or "Resume content unavailable"
         candidate_info["resume_id"] = selected_resume_id
         candidate_info["resume_count"] = 1 if resume_text else 0
-        
+
         return self._format_candidate_resume(candidate_info)
-    
+
+    async def get_resume_file(self, resume_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch the original resume FILE (not parsed text) for a resume ID.
+
+        This is the same file JobDiva's own "Open Resume" button downloads —
+        e.g. the PDF/DOCX as the candidate submitted it — via the
+        ResumeDetail BI endpoint's FILECONTENT_BASE64ENCODED field.
+
+        Returns None (letting the caller fall back to the generated .doc) if
+        the file is missing, malformed, an unexpected type, or too large to
+        email as an attachment.
+        """
+        if not resume_id:
+            return None
+
+        token = await self.authenticate()
+        if not token:
+            logger.warning(f"JobDiva authentication failed fetching resume file {resume_id}")
+            return None
+
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await _bi_rate_limit.bi_get(
+                    client, f"{self.api_url}/apiv2/bi/ResumeDetail", max_wait_s=30.0,
+                    label="ResumeDetail:file", params={"resumeId": resume_id}, headers=headers,
+                )
+
+                if response is None or response.status_code != 200:
+                    logger.warning(f"ResumeDetail file fetch failed for {resume_id}: {getattr(response, 'status_code', None)}")
+                    return None
+
+                data = response.json()
+                rows = data.get("data") if isinstance(data, dict) else None
+                row = rows[0] if isinstance(rows, list) and rows else (rows if isinstance(rows, dict) else None)
+                if not row:
+                    return None
+
+                raw_filename = row.get("FILENAME")
+                b64_content = row.get("FILECONTENT_BASE64ENCODED")
+                if not raw_filename or not b64_content:
+                    return None
+
+                filename = _sanitize_resume_filename(raw_filename)
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in _ALLOWED_RESUME_EXTENSIONS:
+                    logger.warning(
+                        f"ResumeDetail file for {resume_id} has unexpected extension {ext!r}; "
+                        "falling back to generated doc"
+                    )
+                    return None
+
+                try:
+                    content = base64.b64decode(b64_content, validate=True)
+                except (binascii.Error, ValueError) as decode_err:
+                    logger.warning(f"ResumeDetail returned malformed base64 for {resume_id}: {decode_err}")
+                    return None
+
+                if len(content) > _MAX_RESUME_ATTACHMENT_BYTES:
+                    logger.warning(
+                        f"ResumeDetail file for {resume_id} is {len(content)} bytes, "
+                        f"over the {_MAX_RESUME_ATTACHMENT_BYTES}-byte attachment limit; "
+                        "falling back to generated doc"
+                    )
+                    return None
+
+                return {
+                    "filename": filename,
+                    "content": content,
+                }
+        except Exception as e:
+            logger.warning(f"Error fetching resume file for resume_id {resume_id}: {e}")
+            return None
+
     def _format_candidate_resume(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """Format candidate data for resume display."""
         # Extract basic info using multiple possible field names
