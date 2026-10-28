@@ -456,17 +456,32 @@ export default function CandidateEvaluationReportPage() {
             </p>
           </div>
           <div className="flex gap-3 no-print">
-            {isExternalSubmission || isRejected ? (
-              <div className={cn(
-                "flex items-center gap-2 px-6 py-2 rounded-xl text-[14px] font-bold shadow-sm border",
-                isExternalSubmission
-                  ? "bg-emerald-50 border-emerald-200 text-emerald-700" 
-                  : "bg-rose-50 border-rose-200 text-rose-700"
-              )}>
-                {isExternalSubmission ? (
-                  <><CircleCheck className="w-4 h-4" /> Submitted</>
-                ) : (
-                  <><Ban className="w-4 h-4" /> Rejected</>
+            {isExternalSubmission ? (
+              <div className="flex items-center gap-2 px-6 py-2 rounded-xl text-[14px] font-bold shadow-sm border bg-emerald-50 border-emerald-200 text-emerald-700">
+                <CircleCheck className="w-4 h-4" /> Submitted
+              </div>
+            ) : isRejected ? (
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 px-6 py-2 rounded-xl text-[14px] font-bold shadow-sm border bg-rose-50 border-rose-200 text-rose-700">
+                  <Ban className="w-4 h-4" /> Rejected
+                </div>
+                {!sharedVia && (
+                  <button
+                    onClick={() => {
+                      // Reopen the same reject modal, prefilled with the
+                      // already-recorded reason, so a recruiter can change
+                      // it — this used to be impossible, since the whole
+                      // Submit/Reject button row disappeared behind this
+                      // static "Rejected" badge once a rejection was
+                      // recorded.
+                      setRejectReason(String(candidate.feedback_reason || ""));
+                      setIntegrationModalOpen('reject');
+                    }}
+                    className="flex items-center gap-2 px-4 py-2 bg-white border border-rose-200 rounded-lg text-sm font-medium text-rose-600 hover:bg-rose-50 transition-all shadow-sm"
+                  >
+                    <Ban className="w-4 h-4" />
+                    Change Rejection Reason
+                  </button>
                 )}
               </div>
             ) : (
