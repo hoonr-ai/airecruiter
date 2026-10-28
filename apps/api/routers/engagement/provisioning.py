@@ -2,6 +2,7 @@
 
 import asyncio
 import html
+import mimetypes
 from typing import Optional, List, Any, Dict, Tuple, Sequence
 import psycopg2.extras
 import json
@@ -1100,11 +1101,13 @@ async def _check_and_fire_candidate_passed_notification(
         # returns nothing/placeholder text, we fall back to the locally stored
         # resume below so the pass email still carries an attachment.
         fetched_jobdiva_resume = ""
+        jd_resume_id = None
         if str(jd_candidate_id).isdigit():
             try:
                 jd_resume = await jobdiva_service.get_candidate_resume(candidate_id=str(jd_candidate_id))
                 if isinstance(jd_resume, dict):
                     fetched_jobdiva_resume = jd_resume.get("resume_text") or ""
+                    jd_resume_id = jd_resume.get("resume_id")
             except Exception as resume_err:
                 logger.warning(
                     "Failed to fetch JobDiva resume for candidate %s: %s",
@@ -1122,11 +1125,32 @@ async def _check_and_fire_candidate_passed_notification(
                 job_id,
             )
 
-        if (resume_text or "").strip():
+        resume_content_type = None
+
+        # Attach the resume exactly as submitted (the same file JobDiva's own
+        # "Open Resume" button downloads — usually a PDF) instead of a plain
+        # text reconstruction, whenever we have a real JobDiva resume to point at.
+        if not used_local_resume_fallback and jd_resume_id:
+            try:
+                resume_file = await jobdiva_service.get_resume_file(jd_resume_id)
+            except Exception as file_err:
+                resume_file = None
+                logger.warning(
+                    "Failed to fetch original resume file for resume_id %s: %s",
+                    jd_resume_id,
+                    file_err,
+                )
+            if resume_file and resume_file.get("content"):
+                resume_bytes = resume_file["content"]
+                resume_filename = resume_file["filename"]
+                resume_content_type = mimetypes.guess_type(resume_filename)[0] or "application/octet-stream"
+
+        if resume_bytes is None and (resume_text or "").strip():
             resume_bytes = _build_word_resume_document(cand_row["name"] or "Candidate", resume_text)
             # Try to get name from candidate
             safe_name = "".join(c for c in (cand_row["name"] or "Candidate") if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
             resume_filename = f"Resume_{safe_name}_{job_id}.doc"
+            resume_content_type = "application/msword"
         
         app_job_id = str(job_row.get("job_id") or job_id)
 
@@ -1157,6 +1181,7 @@ async def _check_and_fire_candidate_passed_notification(
             recruiter_emails=recruiter_emails,
             resume_bytes=resume_bytes,
             resume_filename=resume_filename,
+            resume_content_type=resume_content_type,
             candidate_id=candidate_id,
             job_id=app_job_id,
             jobdiva_candidate_id=jd_profile_id,

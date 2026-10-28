@@ -3803,9 +3803,56 @@ class JobDivaService:
         candidate_info["resume_text"] = resume_text or "Resume content unavailable"
         candidate_info["resume_id"] = selected_resume_id
         candidate_info["resume_count"] = 1 if resume_text else 0
-        
+
         return self._format_candidate_resume(candidate_info)
-    
+
+    async def get_resume_file(self, resume_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch the original resume FILE (not parsed text) for a resume ID.
+
+        This is the same file JobDiva's own "Open Resume" button downloads —
+        e.g. the PDF/DOCX as the candidate submitted it — via the
+        ResumeDetail BI endpoint's FILECONTENT_BASE64ENCODED field.
+        """
+        if not resume_id:
+            return None
+
+        token = await self.authenticate()
+        if not token:
+            logger.warning(f"JobDiva authentication failed fetching resume file {resume_id}")
+            return None
+
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await _bi_rate_limit.bi_get(
+                    client, f"{self.api_url}/apiv2/bi/ResumeDetail", max_wait_s=30.0,
+                    label="ResumeDetail:file", params={"resumeId": resume_id}, headers=headers,
+                )
+
+                if response is None or response.status_code != 200:
+                    logger.debug(f"ResumeDetail file fetch failed for {resume_id}: {getattr(response, 'status_code', None)}")
+                    return None
+
+                data = response.json()
+                rows = data.get("data") if isinstance(data, dict) else None
+                row = rows[0] if isinstance(rows, list) and rows else (rows if isinstance(rows, dict) else None)
+                if not row:
+                    return None
+
+                filename = row.get("FILENAME")
+                b64_content = row.get("FILECONTENT_BASE64ENCODED")
+                if not filename or not b64_content:
+                    return None
+
+                return {
+                    "filename": filename,
+                    "content": base64.b64decode(b64_content),
+                }
+        except Exception as e:
+            logger.warning(f"Error fetching resume file for resume_id {resume_id}: {e}")
+            return None
+
     def _format_candidate_resume(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """Format candidate data for resume display."""
         # Extract basic info using multiple possible field names
