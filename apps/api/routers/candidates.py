@@ -6223,10 +6223,27 @@ async def save_candidate_feedback(
     # comparing against it — not request.reason alone — is what tells
     # "unchanged" apart from "first rejection" or "changed from one reason
     # to another" (both of which must still create a note).
+    #
+    # PR #868 review: also require feedback_synced — if the PRIOR reject's
+    # own create_candidate_note call failed, that prior attempt never made it
+    # into JobDiva at all, so a recruiter re-submitting the exact same reason
+    # is retrying a failed sync, not re-confirming a no-op. Skipping it then
+    # would report success while leaving JobDiva permanently out of sync.
+    #
+    # PR #868 review: the comparison below is deliberately exact-after-strip,
+    # not case- or internal-whitespace-insensitive. request.reason only ever
+    # reaches here as one of RejectionReasonSelect's fixed, enumerated option
+    # strings (apps/web/lib/rejection.ts), never free text a recruiter could
+    # mistype with different casing/spacing — so looser normalization would
+    # only paper over a genuinely new, unmapped reason string reaching this
+    # endpoint directly (bypassing the UI), which should fail loud via
+    # REJECTION_REASON_TO_JOBDIVA_ACTION's own 422 above, not be silently
+    # treated as "unchanged".
     reject_reason_unchanged = (
         request.feedback_type == "Reject"
         and str(data_blob.get("feedback_type") or "") == "Reject"
         and str(data_blob.get("feedback_reason") or "").strip() == str(request.reason or "").strip()
+        and bool(data_blob.get("feedback_synced"))
     )
 
     if request.feedback_type in ("Unreachable", "Allotment Slot Filled", "Callback Scheduled"):

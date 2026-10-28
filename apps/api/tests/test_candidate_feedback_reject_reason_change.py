@@ -23,7 +23,26 @@ from tests.test_candidate_feedback_new_statuses import _base_setup
 
 _FAKE_CAND_ROW_ALREADY_REJECTED = (
     55148489, "21562841721070", "26-12137",
-    {"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements"},
+    {"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements", "feedback_synced": True},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+)
+
+# Same prior reason, but the PRIOR create_candidate_note call never actually
+# succeeded (feedback_synced stayed False) — a recruiter re-submitting the
+# same reason here is retrying a failed sync, not re-confirming a no-op, and
+# must still get a note.
+_FAKE_CAND_ROW_REJECTED_SYNC_FAILED = (
+    55148489, "21562841721070", "26-12137",
+    {"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements", "feedback_synced": False},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+)
+
+# A prior Submit (not a Reject) with the same string coincidentally left in
+# feedback_reason (recruiter_notes-style leftover) must not be mistaken for
+# an unchanged rejection — feedback_type doesn't match "Reject".
+_FAKE_CAND_ROW_PRIOR_SUBMIT = (
+    55148489, "21562841721070", "26-12137",
+    {"feedback_type": "Submit", "feedback_reason": "Skills do not meet requirements", "feedback_synced": True},
     "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
 )
 
@@ -71,6 +90,58 @@ async def test_changing_to_a_different_reason_creates_a_new_note(monkeypatch):
     assert res["status"] == "success"
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR Reject - Communication skills"
+
+
+@pytest.mark.anyio
+async def test_retry_after_failed_sync_creates_note_even_with_same_reason(monkeypatch):
+    """PR #868 review (medium): if the prior Reject's own create_candidate_note
+    call failed, feedback_synced stays False — re-submitting the identical
+    reason must still create a note (it's a retry, not a no-op), or JobDiva
+    would be left permanently out of sync while the response reports
+    success."""
+    cand_module, jobdiva_calls, _fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_REJECTED_SYNC_FAILED,
+    )
+
+    res = await _reject(cand_module, "Skills do not meet requirements")
+
+    assert res["status"] == "success"
+    assert len(jobdiva_calls) == 1
+    assert jobdiva_calls[0]["action"] == "PAIR Reject - Skills do not meet requirements"
+
+
+@pytest.mark.anyio
+async def test_prior_submit_with_same_text_is_not_treated_as_unchanged_reject(monkeypatch):
+    """A prior feedback_type of "Submit" must never satisfy the "unchanged"
+    check just because feedback_reason happens to hold the same string —
+    only a prior Reject can be "unchanged"; anything else is a fresh
+    rejection and must get its own note."""
+    cand_module, jobdiva_calls, _fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_PRIOR_SUBMIT,
+    )
+
+    res = await _reject(cand_module, "Skills do not meet requirements")
+
+    assert res["status"] == "success"
+    assert len(jobdiva_calls) == 1
+    assert jobdiva_calls[0]["action"] == "PAIR Reject - Skills do not meet requirements"
+
+
+@pytest.mark.anyio
+async def test_empty_reason_falls_back_to_generic_reject_action_and_still_notes(monkeypatch):
+    """No reason provided (reason=None) must map to the generic "PAIR
+    Reject" action (REJECTION_REASON_TO_JOBDIVA_ACTION's own default) and
+    must not be mistaken for "unchanged" against a prior reason-less
+    rejection — both sides normalize None/"" the same way via str(...).strip(),
+    so two genuinely reason-less Rejects in a row DO count as unchanged,
+    which is correct: there's no reason text to have "changed"."""
+    cand_module, jobdiva_calls, _fake_conn = _base_setup(monkeypatch)
+
+    res = await _reject(cand_module, None)
+
+    assert res["status"] == "success"
+    assert len(jobdiva_calls) == 1
+    assert jobdiva_calls[0]["action"] == "PAIR Reject"
 
 
 @pytest.mark.anyio

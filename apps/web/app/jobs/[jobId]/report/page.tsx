@@ -491,7 +491,7 @@ export default function CandidateEvaluationReportPage() {
                     <CircleCheck className="w-4 h-4" /> Internally Submitted
                   </div>
                 )}
-                <button
+                <button 
                   onClick={() => window.print()}
                   className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50 transition-all shadow-sm"
                 >
@@ -499,7 +499,7 @@ export default function CandidateEvaluationReportPage() {
                   Download PDF
                 </button>
                 {!sharedVia && (<>
-                <button
+                <button 
                   onClick={() => setIntegrationModalOpen('submit')}
                   className={cn(
                     "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white transition-all shadow-md",
@@ -520,7 +520,7 @@ export default function CandidateEvaluationReportPage() {
                     </>
                   )}
                 </button>
-                <button
+                <button 
                   onClick={() => setIntegrationModalOpen('reject')}
                   className="flex items-center gap-2 px-4 py-2 bg-white border border-rose-200 rounded-lg text-sm font-medium text-rose-600 hover:bg-rose-50 transition-all shadow-sm"
                 >

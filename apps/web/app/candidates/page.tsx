@@ -24,6 +24,7 @@ import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { RejectionReasonSelect } from "@/components/RejectionReasonSelect";
+import { ChangeRejectionReasonButton } from "@/components/ChangeRejectionReasonButton";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import {
   Select,
@@ -1481,25 +1482,15 @@ export default function GlobalCandidatesPage() {
                                 </div>
                               )}
                               {feedback === 'Reject' && (
-                                // Radix's Select only calls onValueChange when the picked
-                                // value differs from its current controlled `value` —
-                                // reselecting "Reject" while it's already "Reject" is a
-                                // no-op there, so the reason picker can never reopen
-                                // through the dropdown alone once a rejection is
-                                // recorded. This button is the only way to change an
-                                // already-recorded rejection reason.
-                                <button
-                                  type="button"
+                                <ChangeRejectionReasonButton
+                                  candidateName={c.name}
                                   disabled={syncingCandidateId === c.id}
                                   onClick={() => {
                                     setActionCandidateId(c.id);
                                     setRejectReason(c.feedback_reason || "");
                                     setIntegrationModalOpen('reject');
                                   }}
-                                  className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-700 underline underline-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                  Change reason
-                                </button>
+                                />
                               )}
                             </div>
                           )}
