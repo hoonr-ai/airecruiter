@@ -6239,11 +6239,27 @@ async def save_candidate_feedback(
     # endpoint directly (bypassing the UI), which should fail loud via
     # REJECTION_REASON_TO_JOBDIVA_ACTION's own 422 above, not be silently
     # treated as "unchanged".
+    prior_reject_reason = str(data_blob.get("feedback_reason") or "").strip()
+    new_reject_reason = str(request.reason or "").strip()
     reject_reason_unchanged = (
         request.feedback_type == "Reject"
         and str(data_blob.get("feedback_type") or "") == "Reject"
-        and str(data_blob.get("feedback_reason") or "").strip() == str(request.reason or "").strip()
+        and prior_reject_reason == new_reject_reason
         and bool(data_blob.get("feedback_synced"))
+    )
+    # Distinct from reject_reason_unchanged: this is true only when the
+    # candidate was already rejected for a DIFFERENT, non-empty reason and is
+    # now being rejected again for a new one — never for a first-ever
+    # rejection (no prior reason to have changed from), and never for a
+    # same-reason retry (that's a sync retry, not a change). Confirmed with
+    # product (Somya): an updated rejection's JobDiva note must say in its
+    # own text that the reason changed, not just read like a second,
+    # unrelated first-time rejection.
+    is_rejection_reason_change = (
+        request.feedback_type == "Reject"
+        and str(data_blob.get("feedback_type") or "") == "Reject"
+        and bool(prior_reject_reason)
+        and prior_reject_reason != new_reject_reason
     )
 
     if request.feedback_type in ("Unreachable", "Allotment Slot Filled", "Callback Scheduled"):
@@ -6256,11 +6272,20 @@ async def save_candidate_feedback(
         )
         jobdiva_result = {"status": "success", "message": "Rejection reason unchanged; no new note created."}
     else:
+        if is_rejection_reason_change:
+            safe_prior_reason = html.escape(prior_reject_reason, quote=True)
+            safe_new_reason = html.escape(new_reject_reason, quote=True)
+            note_text = (
+                f"The rejection reason was updated from \"{safe_prior_reason}\" to \"{safe_new_reason}\". "
+                f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report."
+            )
+        else:
+            note_text = f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report."
         jobdiva_result = await jobdiva_service.create_candidate_note(
             candidate_id=jd_candidate_id,
             job_id=jd_job_ref,
             action=action_string,
-            note_text=f"<a href=\"{safe_report_link}\" target=\"_blank\">Click Here</a> to view the report.",
+            note_text=note_text,
             recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
         )
 

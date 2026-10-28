@@ -65,6 +65,12 @@ async def test_first_rejection_creates_jobdiva_note(monkeypatch):
     assert res["status"] == "success"
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR Reject - Skills do not meet requirements"
+    # A first-ever rejection's note must read exactly as it always has — only
+    # a genuine reason CHANGE (see test_changing_to_a_different_reason_
+    # creates_a_new_note below) gets the extra "updated from ... to ..." sentence.
+    assert "The rejection reason was updated" not in jobdiva_calls[0]["note_text"]
+    assert jobdiva_calls[0]["note_text"].startswith("<a href=")
+    assert jobdiva_calls[0]["note_text"].endswith("Click Here</a> to view the report.")
 
 
 @pytest.mark.anyio
@@ -90,6 +96,12 @@ async def test_changing_to_a_different_reason_creates_a_new_note(monkeypatch):
     assert res["status"] == "success"
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR Reject - Communication skills"
+    # Confirmed with product (Somya): an updated rejection's note must say so
+    # in its own text, so it reads differently from a first-time rejection
+    # even though both show under the same "PAIR Reject - <reason>" action.
+    note_text = jobdiva_calls[0]["note_text"]
+    assert note_text.startswith("The rejection reason was updated from \"Skills do not meet requirements\" to \"Communication skills\".")
+    assert note_text.endswith("Click Here</a> to view the report.")
 
 
 @pytest.mark.anyio
@@ -108,6 +120,9 @@ async def test_retry_after_failed_sync_creates_note_even_with_same_reason(monkey
     assert res["status"] == "success"
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR Reject - Skills do not meet requirements"
+    # Same reason as before — a retried sync, not a reason change, so the
+    # note must read like a plain (first-time-shaped) rejection note.
+    assert "The rejection reason was updated" not in jobdiva_calls[0]["note_text"]
 
 
 @pytest.mark.anyio
@@ -125,6 +140,9 @@ async def test_prior_submit_with_same_text_is_not_treated_as_unchanged_reject(mo
     assert res["status"] == "success"
     assert len(jobdiva_calls) == 1
     assert jobdiva_calls[0]["action"] == "PAIR Reject - Skills do not meet requirements"
+    # Prior feedback_type wasn't "Reject", so this is a fresh rejection, not
+    # a reason change — same plain note shape as a genuine first rejection.
+    assert "The rejection reason was updated" not in jobdiva_calls[0]["note_text"]
 
 
 @pytest.mark.anyio
