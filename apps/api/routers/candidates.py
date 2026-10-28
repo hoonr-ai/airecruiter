@@ -6213,9 +6213,31 @@ async def save_candidate_feedback(
     report_link = candidate_report_link(resolve_app_base_url(), app_job_ref, jd_candidate_id)
     safe_report_link = html.escape(report_link, quote=True)
 
+    # A recruiter can change an already-recorded rejection to a different
+    # reason (the UI's "Change reason" affordance) — each actual change gets
+    # its own new JobDiva note (never edited/replaced, per product: JobDiva
+    # notes are an append-only history), but re-confirming the SAME reason
+    # that's already on file (e.g. a reopened-then-cancelled-then-reopened
+    # modal re-submitted as-is) must not spam a duplicate note. data_blob is
+    # this row's PRE-write state (captured above, before step 3's merge), so
+    # comparing against it — not request.reason alone — is what tells
+    # "unchanged" apart from "first rejection" or "changed from one reason
+    # to another" (both of which must still create a note).
+    reject_reason_unchanged = (
+        request.feedback_type == "Reject"
+        and str(data_blob.get("feedback_type") or "") == "Reject"
+        and str(data_blob.get("feedback_reason") or "").strip() == str(request.reason or "").strip()
+    )
+
     if request.feedback_type in ("Unreachable", "Allotment Slot Filled", "Callback Scheduled"):
         logger.info("ℹ️ Skipping JobDiva note for '%s' status.", request.feedback_type)
         jobdiva_result = {"status": "success"}
+    elif reject_reason_unchanged:
+        logger.info(
+            "ℹ️ Skipping JobDiva note — rejection reason unchanged (%r) for candidate=%s job=%s",
+            request.reason, jd_candidate_id, jd_job_ref,
+        )
+        jobdiva_result = {"status": "success", "message": "Rejection reason unchanged; no new note created."}
     else:
         jobdiva_result = await jobdiva_service.create_candidate_note(
             candidate_id=jd_candidate_id,

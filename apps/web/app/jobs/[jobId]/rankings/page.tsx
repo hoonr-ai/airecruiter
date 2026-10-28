@@ -3250,6 +3250,27 @@ export default function CandidateRankingsPage() {
                                     </div>
                                   );
                                 })()}
+                                {feedbacks[candidate.id] === 'Reject' && (
+                                  // Radix's Select only calls onValueChange when the
+                                  // picked value differs from its current controlled
+                                  // `value` — reselecting "Reject" while it's already
+                                  // "Reject" is a no-op there, so the reason picker can
+                                  // never reopen through the dropdown alone once a
+                                  // rejection is recorded. This button is the only way
+                                  // to change an already-recorded rejection reason.
+                                  <button
+                                    type="button"
+                                    disabled={syncingCandidateId === candidate.id}
+                                    onClick={() => {
+                                      setActionCandidateId(candidate.id);
+                                      setRejectReason(feedbackReasons[candidate.id] || "");
+                                      setIntegrationModalOpen('reject');
+                                    }}
+                                    className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-700 underline underline-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    Change reason
+                                  </button>
+                                )}
                               </div>
                             )}
                           </div>
