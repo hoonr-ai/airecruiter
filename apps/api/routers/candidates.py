@@ -6098,9 +6098,17 @@ async def save_candidate_feedback(
             locked_prev_data: Optional[Dict[str, Any]] = None
             if sc_row_id is not None:
                 if request.feedback_type == "Reject":
+                    # sourced_candidates.data, not bare data: the FROM
+                    # subquery also selects a column named data, so the SET
+                    # clause's bare "data" is ambiguous between the two and
+                    # every Reject through this path failed outright
+                    # ("column reference \"data\" is ambiguous") until
+                    # qualified — caught by running this against a real
+                    # Postgres, not by the mocked-cursor unit tests, which
+                    # never execute real SQL.
                     _cur2.execute(
                         """UPDATE sourced_candidates
-                              SET data = data || %s::jsonb, updated_at = now()
+                              SET data = sourced_candidates.data || %s::jsonb, updated_at = now()
                             FROM (SELECT data FROM sourced_candidates WHERE id = %s FOR UPDATE) AS prev
                             WHERE sourced_candidates.id = %s
                             RETURNING prev.data AS prev_data""",
@@ -6136,9 +6144,11 @@ async def save_candidate_feedback(
                 # reason change" decision, instead of whichever row the
                 # driver happens to return first.
                 if request.feedback_type == "Reject":
+                    # sourced_candidates.data, not bare data — same ambiguous-
+                    # column fix as the sc_row_id branch above.
                     _cur2.execute(
                         """UPDATE sourced_candidates
-                              SET data = data || %s::jsonb, updated_at = now()
+                              SET data = sourced_candidates.data || %s::jsonb, updated_at = now()
                             FROM (
                                 SELECT id, data, updated_at FROM sourced_candidates
                                 WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
