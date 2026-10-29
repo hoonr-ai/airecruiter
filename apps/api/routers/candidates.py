@@ -6106,26 +6106,49 @@ async def save_candidate_feedback(
                         (feedback_payload, sc_row_id)
                     )
             else:
-                # Fallback: match by candidate_id + job ref
+                # Fallback: match by candidate_id + job ref. This can match
+                # more than one row — a multi-sourced candidate (JobDiva +
+                # LinkedIn + manual, …) has one sourced_candidates row per
+                # channel (see sourced_candidate_dedup's own docstring) — and
+                # the UPDATE above has always written all of them, unchanged
+                # here. The lock subquery below only has to get two things
+                # right for the NEW Reject-only lock: a deterministic
+                # acquisition order (so two concurrent requests matching the
+                # same duplicate rows lock them in the same order and one
+                # waits instead of both deadlocking), and a deliberate choice
+                # of which matched row's pre-write state feeds the "did the
+                # reason change" decision, instead of whichever row the
+                # driver happens to return first.
                 if request.feedback_type == "Reject":
                     _cur2.execute(
                         """UPDATE sourced_candidates
                               SET data = data || %s::jsonb, updated_at = now()
                             FROM (
-                                SELECT id, data FROM sourced_candidates
+                                SELECT id, data, updated_at FROM sourced_candidates
                                 WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
                                   AND (jobdiva_id = %s
                                        OR jobdiva_id IN (
                                              SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
                                        ))
+                                ORDER BY id
                                 FOR UPDATE
                             ) AS prev
                             WHERE sourced_candidates.id = prev.id
-                            RETURNING prev.data AS prev_data""",
+                            RETURNING prev.id AS prev_id, prev.data AS prev_data, prev.updated_at AS prev_updated_at""",
                         (feedback_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
                     )
-                    row = _cur2.fetchone()
-                    locked_prev_data = row[0] if row else None
+                    # Same tiebreak tail as CALLBACK_ROW_TIEBREAKER (most
+                    # recently touched, then highest id) — not that constant
+                    # itself, since its callback-scheduled preference has no
+                    # bearing on which row's REJECT state is "current" here.
+                    rows = _cur2.fetchall()
+                    locked_prev_data = None
+                    if rows:
+                        best = max(
+                            rows,
+                            key=lambda r: (r[2] or datetime.min.replace(tzinfo=timezone.utc), r[0]),
+                        )
+                        locked_prev_data = best[1]
                 else:
                     _cur2.execute(
                         """UPDATE sourced_candidates

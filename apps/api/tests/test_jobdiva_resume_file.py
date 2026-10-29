@@ -11,7 +11,7 @@ import base64
 import httpx
 
 from services import jobdiva
-from services.jobdiva import JobDivaService, _sanitize_resume_filename
+from services.jobdiva import JobDivaService, _sanitize_resume_filename, _content_matches_resume_extension
 
 svc = JobDivaService()
 
@@ -176,6 +176,56 @@ def test_get_resume_file_accepts_matching_docx_doc_rtf_txt_content(monkeypatch):
         }))
         result = _run(svc.get_resume_file("123_1_1"))
         assert result == {"filename": filename, "content": raw_bytes}, filename
+
+
+# --- real-world leniency (PR #870 review) ---------------------------------
+# An earlier, stricter version of _content_matches_resume_extension rejected
+# real resumes that don't look exactly like a textbook example of their
+# extension, silently losing the candidate's original formatting to the
+# generated-.doc fallback. Each case here is a real-world shape the review
+# named explicitly.
+
+def test_doc_extension_accepts_actual_rtf_content():
+    """Many files named .doc are actually RTF saved with the old extension —
+    Word opens them fine."""
+    assert _content_matches_resume_extension(b"{\\rtf1\\ansi Heather's resume}", ".doc")
+
+
+def test_doc_extension_accepts_actual_ooxml_zip_content():
+    """Same, for a .doc that's actually an OOXML (modern Word) document."""
+    assert _content_matches_resume_extension(b"PK\x03\x04fake docx-as-doc bytes", ".doc")
+
+
+def test_pdf_header_found_anywhere_in_first_1024_bytes():
+    """The PDF spec allows %PDF- anywhere in the first 1024 bytes; some
+    generators emit leading whitespace or a BOM before it."""
+    assert _content_matches_resume_extension(b"\xef\xbb\xbf\n\n%PDF-1.7\n...", ".pdf")
+    assert _content_matches_resume_extension(b" " * 50 + b"%PDF-1.4", ".pdf")
+
+
+def test_pdf_header_too_far_in_is_still_rejected():
+    assert not _content_matches_resume_extension(b" " * 2000 + b"%PDF-1.4", ".pdf")
+
+
+def test_rtf_accepts_leading_bom_and_whitespace():
+    assert _content_matches_resume_extension(b"\xef\xbb\xbf{\\rtf1\\ansi ...}", ".rtf")
+    assert _content_matches_resume_extension(b"\n\n  {\\rtf1\\ansi ...}", ".rtf")
+
+
+def test_txt_accepts_utf16_content_with_bom():
+    """A UTF-16 text file is legitimately full of NUL bytes (every other
+    byte, for ASCII-range characters) but starts with a BOM when properly
+    marked — must not be mistaken for binary."""
+    utf16_le = "Heather's resume text".encode("utf-16-le")
+    assert _content_matches_resume_extension(b"\xff\xfe" + utf16_le, ".txt")
+    utf16_be = "Heather's resume text".encode("utf-16-be")
+    assert _content_matches_resume_extension(b"\xfe\xff" + utf16_be, ".txt")
+
+
+def test_txt_without_bom_still_rejects_nul_bytes():
+    """No BOM means no declared encoding to excuse NUL bytes — the original
+    binary-content guard still applies."""
+    assert not _content_matches_resume_extension(b"not text\x00\x00\x00", ".txt")
 
 
 def test_get_resume_file_happy_path_returns_sanitized_filename_and_bytes(monkeypatch):

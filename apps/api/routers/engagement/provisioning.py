@@ -218,6 +218,14 @@ def _safe_filename_stem(candidate_name: Optional[str]) -> str:
     stem — a name with no alnum characters at all (e.g. one in a script this
     filter doesn't expect, or pure emoji) falls back to "Candidate" rather
     than collapsing the filename to "Resume__<job>.doc".
+
+    This keeps any Unicode letters/digits, not just ASCII ones — confirmed
+    (test_email_attachment_filename_encoding.py) that the email send path
+    doesn't garble a non-ASCII result: core.email's SMTP fallback encodes a
+    non-ASCII filename via RFC 2231 automatically (Python's
+    email.message.Message.add_header does this for any non-ASCII str passed
+    as filename=), and the MS Graph path sends it as a plain JSON string,
+    which needs no such encoding at all.
     """
     import unicodedata
 

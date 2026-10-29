@@ -20,13 +20,18 @@ class BoundedDict(OrderedDict):
 
     def __getitem__(self, key: Hashable) -> Any:
         value = super().__getitem__(key)
-        # Not self.move_to_end(key): OrderedDict.move_to_end's generic path
-        # for a subclass (not an exact OrderedDict) re-enters __getitem__ to
-        # re-fetch the value before relinking it — recursing into this very
-        # call, whose own relink then finds the key already unlinked by the
-        # inner call and raises KeyError. Calling OrderedDict's __delitem__/
-        # __setitem__ directly (not overridden here) relinks it at the C
-        # level without that generic, reentrant fallback.
+        # Not self.move_to_end(key): confirmed by direct testing (not a
+        # documented CPython internal, so stated as observed behavior, not a
+        # claimed mechanism) that calling it here makes dict.pop() on this
+        # same key raise a spurious KeyError for a key that is actually
+        # still present — pop()'s own lookup/relink and this call's relink
+        # land on the same OrderedDict machinery while pop() is still
+        # mid-call. Calling OrderedDict's own __delitem__ + __setitem__
+        # directly (neither overridden here) moves the key to the end
+        # without going through move_to_end at all, which doesn't hit this.
+        # Not atomic against a concurrent reader between the two calls, but
+        # per this module's own docstring these caches are event-loop-only,
+        # never touched from more than one thread.
         OrderedDict.__delitem__(self, key)
         OrderedDict.__setitem__(self, key, value)
         return value

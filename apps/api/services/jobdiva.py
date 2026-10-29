@@ -82,11 +82,10 @@ async def _read_cache_token(kind: str, ident: Any) -> Any:
     try:
         return tuple(await client.mget([_READ_GEN_PREFIX + n for n in names]))
     except Exception as exc:  # noqa: BLE001 — fail-open: a cache-token lookup must never block the real JobDiva call
-        # Same rate limit _mark_redis_down's own WARNING already uses (its
-        # _redis_down_until gate, checked before it flips) — logging this
-        # debug-level detail on every call during a sustained outage would
-        # otherwise spam right alongside it.
-        if time.monotonic() >= _bi_rate_limit._redis_down_until:
+        # Same rate limit _mark_redis_down's own WARNING already uses — logging
+        # this debug-level detail on every call during a sustained outage
+        # would otherwise spam right alongside it.
+        if not _bi_rate_limit.is_redis_marked_down():
             logger.debug("jobdiva read-cache token lookup failed (Redis): %s", exc)
         _bi_rate_limit._mark_redis_down(exc)
         return BYPASS
@@ -106,7 +105,7 @@ async def _bump_read_gens(names: List[str]) -> None:
             pipe.expire(_READ_GEN_PREFIX + n, _READ_GEN_TTL_S)
         await pipe.execute()
     except Exception as exc:  # noqa: BLE001 — never raises: a failed bump must not fail the write
-        if time.monotonic() >= _bi_rate_limit._redis_down_until:
+        if not _bi_rate_limit.is_redis_marked_down():
             logger.debug("jobdiva read-cache generation bump failed (Redis): %s", exc)
         _bi_rate_limit._mark_redis_down(exc)
 
@@ -1533,33 +1532,68 @@ _MAX_RESUME_ATTACHMENT_BYTES = 3 * 1024 * 1024  # ~Graph API attachment ceiling
 _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9 ._()\-]")
 
 
+_OLE_SIGNATURE = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"
+_ZIP_SIGNATURE = b"PK\x03\x04"
+_PDF_SIGNATURE = b"%PDF-"
+_UTF_BOMS = (b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")
+
+
+def _strip_bom_and_leading_ws(content: bytes) -> bytes:
+    """Drop a leading UTF-8/16 BOM, then leading ASCII whitespace — real
+    resume files (PR #870 review) can have either before their actual magic
+    bytes, which a bare `startswith` would otherwise reject."""
+    for bom in _UTF_BOMS:
+        if content.startswith(bom):
+            content = content[len(bom):]
+            break
+    return content.lstrip(b" \t\r\n")
+
+
 def _content_matches_resume_extension(content: bytes, ext: str) -> bool:
     """True if `content`'s own magic bytes are plausible for `ext`: the
     extension alone comes from an externally-supplied filename, so a row
     claiming e.g. .pdf whose content is something else entirely would
     otherwise be attached to a recruiter email as-is, extension and content
     mismatched.
+
+    Deliberately permissive per format (PR #870 review: an earlier, stricter
+    version rejected real-world resumes and silently fell back to the
+    generated .doc, losing the candidate's original formatting):
     """
-    head = content[:8]
     if ext == ".pdf":
-        return head.startswith(b"%PDF-")
+        # The PDF spec allows the header anywhere in the first 1024 bytes —
+        # some generators emit leading whitespace or a BOM before it.
+        return _PDF_SIGNATURE in content[:1024]
     if ext == ".docx":
         # DOCX (and any other OOXML/ZIP container) is a ZIP archive.
-        return head.startswith(b"PK\x03\x04")
+        return content[:4] == _ZIP_SIGNATURE
     if ext == ".doc":
-        # Legacy binary Word format is an OLE/CFBF compound file.
-        return head.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
+        # Many files named .doc are actually RTF or OOXML saved with the old
+        # extension — Word opens all three. Accept the legacy OLE/CFBF
+        # signature, a ZIP/OOXML one, or RTF's.
+        return (
+            content[:8] == _OLE_SIGNATURE
+            or content[:4] == _ZIP_SIGNATURE
+            or _strip_bom_and_leading_ws(content[:1024]).startswith(b"{\\rtf")
+        )
     if ext == ".rtf":
-        return head.startswith(b"{\\rtf")
+        return _strip_bom_and_leading_ws(content[:1024]).startswith(b"{\\rtf")
     if ext == ".txt":
-        # Plain text has no magic bytes of its own — reject anything that
-        # actually matches one of the binary signatures above (a mislabeled
-        # .txt) or contains a NUL byte (never valid in text).
+        # Plain text has no magic bytes of its own. A UTF-16 file is
+        # legitimately full of NUL bytes (every other byte, for ASCII-range
+        # characters) but starts with a BOM when properly marked — checked
+        # first and accepted outright, rather than falling into the NUL
+        # check below and being mistaken for binary. Without a BOM, reject
+        # anything that actually matches one of the binary signatures above
+        # (a mislabeled file) or contains a NUL byte (never valid in
+        # BOM-less text).
+        if content[:2] in (b"\xff\xfe", b"\xfe\xff") or content[:3] == b"\xef\xbb\xbf":
+            return True
         return not (
             b"\x00" in content[:4096]
-            or head.startswith(b"%PDF-")
-            or head.startswith(b"PK\x03\x04")
-            or head.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
+            or content[:8] == _OLE_SIGNATURE
+            or content[:4] == _ZIP_SIGNATURE
+            or content[:5] == _PDF_SIGNATURE
         )
     return True
 
@@ -3931,7 +3965,8 @@ class JobDivaService:
                 if not _content_matches_resume_extension(content, ext):
                     logger.warning(
                         f"ResumeDetail file for {resume_id} claims extension {ext!r} but its "
-                        "content's magic bytes don't match that format; falling back to generated doc"
+                        f"content's magic bytes ({content[:8]!r}) don't match that format; "
+                        "falling back to generated doc"
                     )
                     return None
 

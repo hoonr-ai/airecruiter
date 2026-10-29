@@ -13,6 +13,8 @@ re-confirmed unchanged. See also test_rejection_reasons_sync.py (the
 reason->JobDiva-action mapping itself) and queue_tasks.CREATE_JOBDIVA_PASS_NOTE
 (the unrelated, still-pinned "Pass" note flow this must not touch).
 """
+from datetime import datetime, timezone
+
 import pytest
 from fastapi import BackgroundTasks
 
@@ -44,6 +46,27 @@ _FAKE_CAND_ROW_PRIOR_SUBMIT = (
     55148489, "21562841721070", "26-12137",
     {"feedback_type": "Submit", "feedback_reason": "Skills do not meet requirements", "feedback_synced": True},
     "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+)
+
+# A multi-sourced candidate (JobDiva + LinkedIn + manual, …) can have more
+# than one sourced_candidates row for the same candidate_id + job — the
+# fallback Reject lock's own subquery can match both. The row with the
+# HIGHER id is deliberately the STALER one and the row with the LOWER id is
+# the one most recently touched, so a test that picked "whichever comes
+# back first" or "the highest id" instead of "most recently updated" would
+# still pass by accident unless id and recency disagree like this (PR #870
+# review).
+_FAKE_ROW_DUP_STALE_HIGHER_ID = (
+    99999999, "21562841721070", "26-12137",
+    {"feedback_type": "Reject", "feedback_reason": "Old stale reason from a different duplicate", "feedback_synced": True},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    datetime(2025, 1, 1, tzinfo=timezone.utc),
+)
+_FAKE_ROW_DUP_CURRENT_LOWER_ID = (
+    1, "21562841721070", "26-12137",
+    {"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements", "feedback_synced": True},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    datetime(2026, 1, 1, tzinfo=timezone.utc),
 )
 
 
@@ -239,3 +262,56 @@ async def test_non_reject_feedback_does_not_lock_the_row(monkeypatch):
     ]
     assert len(update_calls) == 1
     assert "FOR UPDATE" not in update_calls[0]
+
+
+@pytest.mark.anyio
+async def test_fallback_lock_picks_the_most_recently_updated_duplicate_row(monkeypatch):
+    """PR #870 review (medium): the fallback path (no sourced_row_id pin) can
+    lock more than one sourced_candidates row for a multi-sourced candidate.
+    The "reason unchanged" decision must deliberately pick the most recently
+    updated one — not whichever row the driver happens to return first, and
+    not just the highest id, which is why the fixture's lower-id row is the
+    newer one."""
+    cand_module, jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=None,
+        select_rows=[_FAKE_ROW_DUP_STALE_HIGHER_ID, _FAKE_ROW_DUP_CURRENT_LOWER_ID],
+    )
+
+    # Same reason as the most-recently-updated duplicate (lower id) — must
+    # read as unchanged. Picking the stale higher-id duplicate instead would
+    # wrongly see this as a change (its reason text differs) and spam a note.
+    res = await _reject(cand_module, "Skills do not meet requirements")
+
+    assert res["status"] == "success"
+    assert len(jobdiva_calls) == 0
+
+    lock_calls = [
+        query for cur in fake_conn.cursors for query, _params in cur.executed_queries
+        if "FOR UPDATE" in query
+    ]
+    assert len(lock_calls) == 1
+    # Deterministic lock-acquisition order (PR #870 review): without this,
+    # two concurrent requests matching the same duplicate rows could lock
+    # them in different orders and deadlock instead of one waiting.
+    assert "ORDER BY id" in lock_calls[0]
+
+
+@pytest.mark.anyio
+async def test_fallback_lock_reports_change_against_the_current_duplicate_row(monkeypatch):
+    """Same fixture as above, but with an actually different new reason —
+    the note must say it changed FROM the most-recently-updated duplicate's
+    reason, not the stale one."""
+    cand_module, jobdiva_calls, _fake_conn = _base_setup(
+        monkeypatch, select_row=None,
+        select_rows=[_FAKE_ROW_DUP_STALE_HIGHER_ID, _FAKE_ROW_DUP_CURRENT_LOWER_ID],
+    )
+
+    res = await _reject(cand_module, "Communication skills")
+
+    assert res["status"] == "success"
+    assert len(jobdiva_calls) == 1
+    note_text = jobdiva_calls[0]["note_text"]
+    assert note_text.startswith(
+        "The rejection reason was updated from \"Skills do not meet requirements\" to \"Communication skills\"."
+    )
+    assert "Old stale reason" not in note_text
