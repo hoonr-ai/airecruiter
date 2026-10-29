@@ -13,7 +13,7 @@ re-confirmed unchanged. See also test_rejection_reasons_sync.py (the
 reason->JobDiva-action mapping itself) and queue_tasks.CREATE_JOBDIVA_PASS_NOTE
 (the unrelated, still-pinned "Pass" note flow this must not touch).
 """
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 from fastapi import BackgroundTasks
@@ -56,17 +56,44 @@ _FAKE_CAND_ROW_PRIOR_SUBMIT = (
 # back first" or "the highest id" instead of "most recently updated" would
 # still pass by accident unless id and recency disagree like this (PR #870
 # review).
+#
+# Naive datetimes, not tz-aware: sourced_candidates.updated_at is TIMESTAMP
+# (no time zone) — sourced_candidates_storage.py's own CREATE TABLE says so —
+# so that's what the real driver actually returns. A prod 500 on this exact
+# path (save_candidate_feedback's own row-lock tiebreak comparing a tz-aware
+# fallback against a row's real, naive updated_at — "can't compare
+# offset-naive and offset-aware datetimes") is why this matters here, not
+# just realism: tz-aware fixtures in both rows let that bug slip past every
+# test below despite them covering the same code path.
 _FAKE_ROW_DUP_STALE_HIGHER_ID = (
     99999999, "21562841721070", "26-12137",
     {"feedback_type": "Reject", "feedback_reason": "Old stale reason from a different duplicate", "feedback_synced": True},
     "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
-    datetime(2025, 1, 1, tzinfo=timezone.utc),
+    datetime(2025, 1, 1),
 )
 _FAKE_ROW_DUP_CURRENT_LOWER_ID = (
     1, "21562841721070", "26-12137",
     {"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements", "feedback_synced": True},
     "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
-    datetime(2026, 1, 1, tzinfo=timezone.utc),
+    datetime(2026, 1, 1),
+)
+
+# One duplicate with a real (naive) updated_at, one with a NULL updated_at —
+# the exact pairing that crashed in production: the None -> tz-aware
+# datetime.min fallback, compared against this row's real NAIVE timestamp,
+# raised "can't compare offset-naive and offset-aware datetimes" inside
+# max(), a 500 on every Reject that hit this fallback path.
+_FAKE_ROW_DUP_NULL_UPDATED_AT = (
+    99999999, "21562841721070", "26-12137",
+    {"feedback_type": "Reject", "feedback_reason": "Old stale reason from a different duplicate", "feedback_synced": True},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    None,
+)
+_FAKE_ROW_DUP_REAL_UPDATED_AT = (
+    1, "21562841721070", "26-12137",
+    {"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements", "feedback_synced": True},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    datetime(2026, 1, 1),
 )
 
 
@@ -315,3 +342,27 @@ async def test_fallback_lock_reports_change_against_the_current_duplicate_row(mo
         "The rejection reason was updated from \"Skills do not meet requirements\" to \"Communication skills\"."
     )
     assert "Old stale reason" not in note_text
+
+
+@pytest.mark.anyio
+async def test_fallback_lock_does_not_crash_when_a_duplicate_has_a_null_updated_at(monkeypatch):
+    """Production regression: a duplicate row with a NULL updated_at next to
+    one with a real (naive) timestamp used to raise "can't compare
+    offset-naive and offset-aware datetimes" inside the tiebreak's max() —
+    the None -> tz-aware datetime.min fallback compared against the other
+    row's real naive datetime — turning every Reject that hit this fallback
+    path into an HTTP 500. The row with an actual timestamp must still win
+    the tiebreak over the null one."""
+    cand_module, jobdiva_calls, _fake_conn = _base_setup(
+        monkeypatch, select_row=None,
+        select_rows=[_FAKE_ROW_DUP_NULL_UPDATED_AT, _FAKE_ROW_DUP_REAL_UPDATED_AT],
+    )
+
+    res = await _reject(cand_module, "Skills do not meet requirements")
+
+    assert res["status"] == "success"
+    # Picked the row with a real updated_at (reason: "Skills do not meet
+    # requirements") over the null-updated_at one, so this reads as
+    # unchanged — not a crash, and not a false "changed" against the stale
+    # null row.
+    assert len(jobdiva_calls) == 0

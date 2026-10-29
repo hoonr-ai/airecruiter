@@ -6141,12 +6141,20 @@ async def save_candidate_feedback(
                     # recently touched, then highest id) — not that constant
                     # itself, since its callback-scheduled preference has no
                     # bearing on which row's REJECT state is "current" here.
+                    # datetime.min, not datetime.min.replace(tzinfo=...): this
+                    # table's updated_at is TIMESTAMP (no time zone) —
+                    # sourced_candidates_storage.py's own CREATE TABLE says so
+                    # — so psycopg2 always returns a naive datetime for it. A
+                    # tz-aware fallback here made max() raise "can't compare
+                    # offset-naive and offset-aware datetimes" (-> 500) the
+                    # moment this ever matched a row with a null updated_at
+                    # alongside one with a real timestamp.
                     rows = _cur2.fetchall()
                     locked_prev_data = None
                     if rows:
                         best = max(
                             rows,
-                            key=lambda r: (r[2] or datetime.min.replace(tzinfo=timezone.utc), r[0]),
+                            key=lambda r: (r[2] or datetime.min, r[0]),
                         )
                         locked_prev_data = best[1]
                 else:
