@@ -20,6 +20,7 @@ from fastapi import BackgroundTasks
 
 from core.auth import UserIdentity
 from models import CandidateFeedbackRequest
+from routers.candidates import _comparable_updated_at
 
 from tests.test_candidate_feedback_new_statuses import _base_setup
 
@@ -48,25 +49,39 @@ _FAKE_CAND_ROW_PRIOR_SUBMIT = (
     "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
 )
 
-# A multi-sourced candidate (JobDiva + LinkedIn + manual, …) can have more
-# than one sourced_candidates row for the same candidate_id + job — the
-# fallback Reject lock's own subquery can match both. The row with the
-# HIGHER id is deliberately the STALER one and the row with the LOWER id is
-# the one most recently touched, so a test that picked "whichever comes
-# back first" or "the highest id" instead of "most recently updated" would
-# still pass by accident unless id and recency disagree like this (PR #870
-# review).
+# A multi-sourced candidate can have more than one sourced_candidates row for
+# the same candidate_id + job; the fallback Reject lock can match several.
+# Higher id is deliberately the staler row, lower id the current one, so
+# "whichever comes back first"/"highest id" would still pass by accident
+# unless id and recency disagree like this.
+#
+# Naive datetimes: the real column is TIMESTAMP (no time zone).
 _FAKE_ROW_DUP_STALE_HIGHER_ID = (
     99999999, "21562841721070", "26-12137",
     {"feedback_type": "Reject", "feedback_reason": "Old stale reason from a different duplicate", "feedback_synced": True},
     "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
-    datetime(2025, 1, 1, tzinfo=timezone.utc),
+    datetime(2025, 1, 1),
 )
 _FAKE_ROW_DUP_CURRENT_LOWER_ID = (
     1, "21562841721070", "26-12137",
     {"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements", "feedback_synced": True},
     "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
-    datetime(2026, 1, 1, tzinfo=timezone.utc),
+    datetime(2026, 1, 1),
+)
+
+# One duplicate with a real updated_at, one NULL — the pairing that crashed
+# in production (naive-vs-aware TypeError inside max(), -> HTTP 500).
+_FAKE_ROW_DUP_NULL_UPDATED_AT = (
+    99999999, "21562841721070", "26-12137",
+    {"feedback_type": "Reject", "feedback_reason": "Old stale reason from a different duplicate", "feedback_synced": True},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    None,
+)
+_FAKE_ROW_DUP_REAL_UPDATED_AT = (
+    1, "21562841721070", "26-12137",
+    {"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements", "feedback_synced": True},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    datetime(2026, 1, 1),
 )
 
 
@@ -315,3 +330,53 @@ async def test_fallback_lock_reports_change_against_the_current_duplicate_row(mo
         "The rejection reason was updated from \"Skills do not meet requirements\" to \"Communication skills\"."
     )
     assert "Old stale reason" not in note_text
+
+
+@pytest.mark.anyio
+async def test_fallback_lock_does_not_crash_when_a_duplicate_has_a_null_updated_at(monkeypatch):
+    """Production regression: a NULL updated_at next to a real one used to
+    raise a naive/aware TypeError in the tiebreak's max() -> HTTP 500. The
+    row with an actual timestamp must still win over the null one."""
+    cand_module, jobdiva_calls, _fake_conn = _base_setup(
+        monkeypatch, select_row=None,
+        select_rows=[_FAKE_ROW_DUP_NULL_UPDATED_AT, _FAKE_ROW_DUP_REAL_UPDATED_AT],
+    )
+
+    res = await _reject(cand_module, "Skills do not meet requirements")
+
+    assert res["status"] == "success"
+    # Picked the row with a real updated_at (reason: "Skills do not meet
+    # requirements") over the null-updated_at one, so this reads as
+    # unchanged — not a crash, and not a false "changed" against the stale
+    # null row.
+    assert len(jobdiva_calls) == 0
+
+
+# --- _comparable_updated_at -----------------------------------------------
+# Direct unit coverage so a future TIMESTAMPTZ migration of this column
+# (which would start handing _cur2 tz-aware values instead of naive ones)
+# doesn't reopen this crash.
+
+def test_comparable_updated_at_none_sorts_as_the_oldest():
+    assert _comparable_updated_at(None) == datetime.min
+
+
+def test_comparable_updated_at_keeps_naive_values_as_is():
+    naive = datetime(2026, 1, 1, 12, 0)
+    assert _comparable_updated_at(naive) == naive
+
+
+def test_comparable_updated_at_strips_tz_from_aware_values():
+    aware = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    result = _comparable_updated_at(aware)
+    assert result.tzinfo is None
+    assert result == datetime(2026, 1, 1, 12, 0)
+
+
+def test_comparable_updated_at_lets_naive_and_aware_rows_compare():
+    """The actual bug: comparing a naive and an aware datetime directly
+    raises TypeError. Both sides funneled through here must not."""
+    naive = datetime(2026, 1, 1)
+    aware = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    assert max([naive, aware], key=_comparable_updated_at) == naive
+    assert max([None, naive, aware], key=_comparable_updated_at) == naive

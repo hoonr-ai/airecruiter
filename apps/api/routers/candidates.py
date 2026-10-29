@@ -119,6 +119,22 @@ def _json_load_safe(value: Any, default: Any):
     return default
 
 
+def _comparable_updated_at(dt: Optional[datetime]) -> datetime:
+    """A `row.updated_at` value, made safe to compare/sort across rows
+    regardless of whether the column (or a future migration of it) is
+    TIMESTAMP (naive) or TIMESTAMPTZ (aware), and regardless of whether any
+    one row's value is NULL. Comparing naive and aware datetimes directly
+    raises TypeError; collapsing everything to one naive UTC representation
+    sidesteps that without caring about absolute instants, which this
+    tiebreak never needed anyway — only each row's order relative to the
+    others in the same query."""
+    if dt is None:
+        return datetime.min
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 from routers.hard_filter_utils import hard_filter_row_display as _hard_filter_row_display
 
 
@@ -6141,12 +6157,14 @@ async def save_candidate_feedback(
                     # recently touched, then highest id) — not that constant
                     # itself, since its callback-scheduled preference has no
                     # bearing on which row's REJECT state is "current" here.
+                    # _comparable_updated_at: a naive/aware mismatch here
+                    # previously raised TypeError inside max() -> HTTP 500.
                     rows = _cur2.fetchall()
                     locked_prev_data = None
                     if rows:
                         best = max(
                             rows,
-                            key=lambda r: (r[2] or datetime.min.replace(tzinfo=timezone.utc), r[0]),
+                            key=lambda r: (_comparable_updated_at(r[2]), r[0]),
                         )
                         locked_prev_data = best[1]
                 else:
