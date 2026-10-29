@@ -120,14 +120,10 @@ def _json_load_safe(value: Any, default: Any):
 
 
 def _comparable_updated_at(dt: Optional[datetime]) -> datetime:
-    """A `row.updated_at` value, made safe to compare/sort across rows
-    regardless of whether the column (or a future migration of it) is
-    TIMESTAMP (naive) or TIMESTAMPTZ (aware), and regardless of whether any
-    one row's value is NULL. Comparing naive and aware datetimes directly
-    raises TypeError; collapsing everything to one naive UTC representation
-    sidesteps that without caring about absolute instants, which this
-    tiebreak never needed anyway — only each row's order relative to the
-    others in the same query."""
+    """Normalizes a `row.updated_at` to one naive-UTC shape so rows compare
+    safely whether the column is TIMESTAMP or TIMESTAMPTZ — mixing naive and
+    aware datetimes raises TypeError. NULL sorts as the oldest possible
+    value (datetime.min); callers tiebreak equal/NULL values by id."""
     if dt is None:
         return datetime.min
     if dt.tzinfo is not None:
@@ -5718,6 +5714,36 @@ CALLBACK_MAX_LEAD = timedelta(days=365)
 # own callback-reminder stale-check — see sourced_candidate_dedup.py's module
 # docstring for why both sides need to agree on which duplicate row is "the" one.
 
+# The two Reject row-lock UPDATEs below (save_candidate_feedback step 3) —
+# module-level constants, not inlined, so test_reject_row_lock_sql_pg.py's
+# own direct-SQL test imports the real query instead of a hand-copied
+# string that could drift from it.
+#
+# `data` is qualified as sourced_candidates.data: the FROM subquery also
+# selects a column named `data`, so a bare `data` on the right of `SET data =`
+# is ambiguous between the two — this broke every single Reject in
+# production until qualified.
+REJECT_LOCK_UPDATE_BY_ROW_ID_SQL = """UPDATE sourced_candidates
+      SET data = sourced_candidates.data || %s::jsonb, updated_at = now()
+    FROM (SELECT data FROM sourced_candidates WHERE id = %s FOR UPDATE) AS prev
+    WHERE sourced_candidates.id = %s
+    RETURNING prev.data AS prev_data"""
+
+REJECT_LOCK_UPDATE_BY_CANDIDATE_JOB_SQL = """UPDATE sourced_candidates
+      SET data = sourced_candidates.data || %s::jsonb, updated_at = now()
+    FROM (
+        SELECT id, data, updated_at FROM sourced_candidates
+        WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
+          AND (jobdiva_id = %s
+               OR jobdiva_id IN (
+                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+               ))
+        ORDER BY id
+        FOR UPDATE
+    ) AS prev
+    WHERE sourced_candidates.id = prev.id
+    RETURNING prev.id AS prev_id, prev.data AS prev_data, prev.updated_at AS prev_updated_at"""
+
 
 @router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/feedback")
 async def save_candidate_feedback(
@@ -6098,20 +6124,8 @@ async def save_candidate_feedback(
             locked_prev_data: Optional[Dict[str, Any]] = None
             if sc_row_id is not None:
                 if request.feedback_type == "Reject":
-                    # sourced_candidates.data, not bare data: the FROM
-                    # subquery also selects a column named data, so the SET
-                    # clause's bare "data" is ambiguous between the two and
-                    # every Reject through this path failed outright
-                    # ("column reference \"data\" is ambiguous") until
-                    # qualified — caught by running this against a real
-                    # Postgres, not by the mocked-cursor unit tests, which
-                    # never execute real SQL.
                     _cur2.execute(
-                        """UPDATE sourced_candidates
-                              SET data = sourced_candidates.data || %s::jsonb, updated_at = now()
-                            FROM (SELECT data FROM sourced_candidates WHERE id = %s FOR UPDATE) AS prev
-                            WHERE sourced_candidates.id = %s
-                            RETURNING prev.data AS prev_data""",
+                        REJECT_LOCK_UPDATE_BY_ROW_ID_SQL,
                         (feedback_payload, sc_row_id, sc_row_id)
                     )
                     row = _cur2.fetchone()
@@ -6144,31 +6158,14 @@ async def save_candidate_feedback(
                 # reason change" decision, instead of whichever row the
                 # driver happens to return first.
                 if request.feedback_type == "Reject":
-                    # sourced_candidates.data, not bare data — same ambiguous-
-                    # column fix as the sc_row_id branch above.
                     _cur2.execute(
-                        """UPDATE sourced_candidates
-                              SET data = sourced_candidates.data || %s::jsonb, updated_at = now()
-                            FROM (
-                                SELECT id, data, updated_at FROM sourced_candidates
-                                WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
-                                  AND (jobdiva_id = %s
-                                       OR jobdiva_id IN (
-                                             SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
-                                       ))
-                                ORDER BY id
-                                FOR UPDATE
-                            ) AS prev
-                            WHERE sourced_candidates.id = prev.id
-                            RETURNING prev.id AS prev_id, prev.data AS prev_data, prev.updated_at AS prev_updated_at""",
+                        REJECT_LOCK_UPDATE_BY_CANDIDATE_JOB_SQL,
                         (feedback_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
                     )
-                    # Same tiebreak tail as CALLBACK_ROW_TIEBREAKER (most
-                    # recently touched, then highest id) — not that constant
-                    # itself, since its callback-scheduled preference has no
-                    # bearing on which row's REJECT state is "current" here.
-                    # _comparable_updated_at: a naive/aware mismatch here
-                    # previously raised TypeError inside max() -> HTTP 500.
+                    # Most recently updated row wins, then highest id —
+                    # same tail as CALLBACK_ROW_TIEBREAKER, not that constant
+                    # itself (its callback-scheduled preference doesn't apply
+                    # to a Reject's "current" row).
                     rows = _cur2.fetchall()
                     locked_prev_data = None
                     if rows:

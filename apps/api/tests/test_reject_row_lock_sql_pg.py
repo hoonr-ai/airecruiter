@@ -19,8 +19,23 @@ TIMESTAMPTZ — since a mismatch there is what caused the *other* bug this
 branch also fixes (naive-vs-aware TypeError in the fallback path's tiebreak).
 
 Skipped when no Postgres is reachable (LAUNCH_PLATFORM_TEST_DSN, then
-LAUNCH_REPORT_TEST_DSN, then "dbname=postgres"). Modeled on
-test_feedback_candidate_resolution_ordering_pg.py's own fixture shape.
+LAUNCH_REPORT_TEST_DSN, then "dbname=postgres" — the same DSN precedence and
+default every other *_pg.py file in this suite uses; only TEMP tables are
+created here, so the shared default database is never actually touched).
+Modeled on test_feedback_candidate_resolution_ordering_pg.py's own fixture
+shape.
+
+PR #872 review: confirmed directly — CI (.github/workflows/deploy.yml) runs
+`pytest -q` with no Postgres service and no LAUNCH_PLATFORM_TEST_DSN, so
+this file (and every other *_pg.py file already in this suite) skips in CI
+today, not just in theory. A prior attempt to add a CI Postgres service
+(PR #851) was reverted because it surfaced unrelated pre-existing failures
+elsewhere that needed their own investigation — reintroducing that change
+here, bundled into an urgent hotfix, would repeat the same mistake. Failing
+instead of skipping under REQUIRE_PG_TESTS=1 gives a future CI change (once
+a Postgres service actually exists) a way to enforce this without silently
+depending on infrastructure that isn't there yet, and without this PR's own
+checks going red over an unrelated, already-known gap.
 """
 import os
 
@@ -33,6 +48,7 @@ from fastapi import BackgroundTasks  # noqa: E402
 from core.auth import UserIdentity  # noqa: E402
 from models import CandidateFeedbackRequest  # noqa: E402
 from routers import candidates as cand_module  # noqa: E402
+from routers.candidates import REJECT_LOCK_UPDATE_BY_CANDIDATE_JOB_SQL  # noqa: E402
 
 _DSN = os.getenv("LAUNCH_PLATFORM_TEST_DSN") or os.getenv("LAUNCH_REPORT_TEST_DSN", "dbname=postgres")
 
@@ -74,6 +90,12 @@ def pg(monkeypatch):
     try:
         conn = psycopg2.connect(_DSN, connect_timeout=3)
     except psycopg2.OperationalError as exc:
+        # REQUIRE_PG_TESTS=1: opt-in for a CI (or local) setup that actually
+        # provisions Postgres, so a missing DB fails loudly instead of this
+        # regression guard silently turning green. Not set by CI today —
+        # see this module's own docstring for why.
+        if os.getenv("REQUIRE_PG_TESTS") == "1":
+            pytest.fail(f"REQUIRE_PG_TESTS=1 but no Postgres reachable at {_DSN!r}: {exc}")
         pytest.skip(f"no Postgres reachable at {_DSN!r}: {exc}")
     try:
         with conn.cursor() as cur:
@@ -184,33 +206,20 @@ async def test_changing_an_already_rejected_reason_does_not_error(pg):
 
 
 def test_fallback_lock_sql_directly_against_two_duplicate_rows(pg):
-    """The candidate_id/jobdiva_id fallback UPDATE's own SQL, run directly
-    against two real duplicate rows — not through save_candidate_feedback,
-    since step 1's own candidate resolution already finds a specific row
-    via its own (job-unscoped) third tier whenever any match exists at all,
-    so a full endpoint call practically never reaches this exact query with
-    more than one row still unresolved. Keep this in sync with the fallback
-    UPDATE in routers/candidates.py if that query's shape changes.
-    """
+    """The real candidate_id/jobdiva_id fallback UPDATE constant, run
+    directly against two real duplicate rows — not through
+    save_candidate_feedback, since step 1's own candidate resolution already
+    finds a specific row via its own (job-unscoped) third tier whenever any
+    match exists at all, so a full endpoint call practically never reaches
+    this exact query with more than one row still unresolved. Imports the
+    same REJECT_LOCK_UPDATE_BY_CANDIDATE_JOB_SQL the endpoint runs, so this
+    can't drift from it the way a hand-copied string could."""
     row_a = _insert_row(pg, source="jobdiva")
     row_b = _insert_row(pg, source="linkedin")
 
     with pg.cursor() as cur:
         cur.execute(
-            """UPDATE sourced_candidates
-                  SET data = sourced_candidates.data || %s::jsonb, updated_at = now()
-                FROM (
-                    SELECT id, data, updated_at FROM sourced_candidates
-                    WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
-                      AND (jobdiva_id = %s
-                           OR jobdiva_id IN (
-                                 SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
-                           ))
-                    ORDER BY id
-                    FOR UPDATE
-                ) AS prev
-                WHERE sourced_candidates.id = prev.id
-                RETURNING prev.id AS prev_id, prev.data AS prev_data, prev.updated_at AS prev_updated_at""",
+            REJECT_LOCK_UPDATE_BY_CANDIDATE_JOB_SQL,
             ('{"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements"}',
              "C1", None, None, "26-100", "26-100", "26-100"),
         )

@@ -84,6 +84,24 @@ _FAKE_ROW_DUP_REAL_UPDATED_AT = (
     datetime(2026, 1, 1),
 )
 
+# Both duplicates with a real updated_at, but one tz-AWARE (e.g. a column
+# that's already migrated to TIMESTAMPTZ) and one naive — the shape
+# _comparable_updated_at's own unit tests cover directly; this pins the same
+# mix down at the full save_candidate_feedback endpoint, not just the helper
+# in isolation.
+_FAKE_ROW_DUP_AWARE_OLDER = (
+    99999999, "21562841721070", "26-12137",
+    {"feedback_type": "Reject", "feedback_reason": "Old stale reason from a different duplicate", "feedback_synced": True},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    datetime(2025, 1, 1, tzinfo=timezone.utc),
+)
+_FAKE_ROW_DUP_NAIVE_NEWER = (
+    1, "21562841721070", "26-12137",
+    {"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements", "feedback_synced": True},
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+    datetime(2026, 1, 1),
+)
+
 
 async def _reject(cand_module, reason):
     user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
@@ -380,3 +398,20 @@ def test_comparable_updated_at_lets_naive_and_aware_rows_compare():
     aware = datetime(2025, 1, 1, tzinfo=timezone.utc)
     assert max([naive, aware], key=_comparable_updated_at) == naive
     assert max([None, naive, aware], key=_comparable_updated_at) == naive
+
+
+@pytest.mark.anyio
+async def test_fallback_lock_does_not_crash_with_a_mix_of_aware_and_naive_duplicates(monkeypatch):
+    """Same naive/aware mix as the _comparable_updated_at unit tests above,
+    pinned down at the full save_candidate_feedback endpoint too — not just
+    the helper in isolation — in case a future change re-introduces a raw
+    comparison somewhere between the DB read and here."""
+    cand_module, jobdiva_calls, _fake_conn = _base_setup(
+        monkeypatch, select_row=None,
+        select_rows=[_FAKE_ROW_DUP_AWARE_OLDER, _FAKE_ROW_DUP_NAIVE_NEWER],
+    )
+
+    res = await _reject(cand_module, "Skills do not meet requirements")
+
+    assert res["status"] == "success"
+    assert len(jobdiva_calls) == 0  # naive-newer row's reason matches -> unchanged
