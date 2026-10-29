@@ -761,3 +761,20 @@ JOBAGENT_CACHE_TTL_S = int(get_env_with_default("JOBAGENT_CACHE_TTL_S", str(12 *
 JOB_INTAKE_PREWARM_ENABLED = get_env_bool("JOB_INTAKE_PREWARM_ENABLED", True)
 # Fix 8: only run contact enrichment for candidates at/above this score.
 CONTACT_ENRICH_MIN_SCORE = int(get_env_with_default("CONTACT_ENRICH_MIN_SCORE", "60"))
+
+# services/jobdiva.py's brief per-worker cache of read-only lookups (job,
+# candidate, submittals) — a dashboard, a tracker and a metrics refresh
+# asking for the same record within seconds share one JobDiva call. 0
+# disables it. Parsed here, not at jobdiva.py's own import time, for
+# consistency with every other env-backed setting.
+try:
+    JOBDIVA_READ_CACHE_TTL_S = float(get_env_with_default("JOBDIVA_READ_CACHE_TTL_S", "30"))
+    # float() parses "-5" and "nan" without raising — neither is a sensible
+    # TTL (AsyncTTLCache's own ttl_s <= 0 check already treats a negative
+    # value the same as 0/disabled, but a NaN comparison is always False,
+    # which would silently defeat that check and leave the cache enabled
+    # with an undefined TTL).
+    if not (JOBDIVA_READ_CACHE_TTL_S >= 0):
+        JOBDIVA_READ_CACHE_TTL_S = 30.0
+except ValueError:
+    JOBDIVA_READ_CACHE_TTL_S = 30.0

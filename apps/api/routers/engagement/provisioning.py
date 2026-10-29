@@ -206,6 +206,34 @@ def _select_pass_email_resume(
     return "", False
 
 
+def _safe_filename_stem(candidate_name: Optional[str]) -> str:
+    """A candidate name, made safe to embed in the generated .doc's
+    filename.
+
+    NFC-normalizes first: a name holding a combining accent as its own
+    Unicode codepoint (decomposed form — possible depending on where the
+    name was entered/imported) has that mark fail isalnum() on its own even
+    though the precomposed character wouldn't, silently dropping it from the
+    filename ("José" -> "Jose") where NFC keeps it. Never returns an empty
+    stem — a name with no alnum characters at all (e.g. one in a script this
+    filter doesn't expect, or pure emoji) falls back to "Candidate" rather
+    than collapsing the filename to "Resume__<job>.doc".
+
+    This keeps any Unicode letters/digits, not just ASCII ones — confirmed
+    (test_email_attachment_filename_encoding.py) that the email send path
+    doesn't garble a non-ASCII result: core.email's SMTP fallback encodes a
+    non-ASCII filename via RFC 2231 automatically (Python's
+    email.message.Message.add_header does this for any non-ASCII str passed
+    as filename=), and the MS Graph path sends it as a plain JSON string,
+    which needs no such encoding at all.
+    """
+    import unicodedata
+
+    name = unicodedata.normalize("NFC", (candidate_name or "").strip()) or "Candidate"
+    safe = "".join(c for c in name if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
+    return safe or "Candidate"
+
+
 async def _resolve_pass_email_resume_attachment(
     jobdiva_service,
     jd_resume_id: Optional[str],
@@ -247,11 +275,28 @@ async def _resolve_pass_email_resume_attachment(
 
     if not resume_bytes and (resume_text or "").strip():
         resume_bytes = _build_word_resume_document(candidate_name or "Candidate", resume_text)
-        safe_name = "".join(
-            c for c in (candidate_name or "Candidate") if c.isalnum() or c in (" ", "-", "_")
-        ).strip().replace(" ", "_")
-        resume_filename = f"Resume_{safe_name}_{job_id}.doc"
+        resume_filename = f"Resume_{_safe_filename_stem(candidate_name)}_{job_id}.doc"
         resume_content_type = "application/msword"
+
+    # The fallback to the generated .doc otherwise happens silently — no way
+    # to see, outside of opening each email, how often the original file path
+    # actually succeeds. A log field plus a New Relic count metric per
+    # outcome lets that be monitored/alerted on instead.
+    attachment_path = (
+        "original_file" if resume_is_original_file
+        else "generated_doc" if resume_bytes
+        else "none"
+    )
+    logger.info(
+        "📎 Pass email resume attachment for job %s: %s (jd_resume_id=%s, "
+        "used_local_resume_fallback=%s)",
+        job_id, attachment_path, jd_resume_id, used_local_resume_fallback,
+    )
+    try:
+        from core.newrelic import record_custom_metric
+        record_custom_metric(f"Custom/PassEmail/ResumeAttachment/{attachment_path}", {"count": 1})
+    except Exception:  # noqa: BLE001 — metrics must never break the email send
+        pass
 
     return resume_bytes, resume_filename, resume_content_type, resume_is_original_file
 

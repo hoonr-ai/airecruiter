@@ -27,6 +27,32 @@ def test_none_values_are_cached():
     assert "miss" in d and d["miss"] is None
 
 
+def test_pop_an_existing_key_after_reading_it_does_not_raise():
+    """Regression guard (PR #870 review): __getitem__'s move-to-end touch
+    used to call self.move_to_end(key), which made a subsequent dict.pop()
+    on that same key raise a spurious KeyError for a key that was actually
+    still present. Reading a key and then popping it is exactly what
+    AsyncTTLCache.invalidate() does after any get_or_load() hit."""
+    d = BoundedDict(3)
+    d["a"] = 1
+    d["b"] = 2
+    assert d["a"] == 1  # touch — this used to corrupt the next pop()
+    assert d.pop("a", None) == 1
+    assert "a" not in d
+    assert d.pop("missing", "default") == "default"
+
+
+def test_lru_order_survives_a_touch_then_pop_of_a_different_key():
+    d = BoundedDict(3)
+    d["a"], d["b"], d["c"] = 1, 2, 3
+    assert d["a"] == 1  # touch: order becomes b, c, a
+    assert list(d.keys()) == ["b", "c", "a"]
+    d.pop("b", None)    # unrelated key removed: order becomes c, a
+    assert list(d.keys()) == ["c", "a"]
+    d["d"] = 4          # back up to capacity, appended at the end
+    assert list(d.keys()) == ["c", "a", "d"]
+
+
 def test_module_caches_are_bounded():
     from services import gender_logic, location
 

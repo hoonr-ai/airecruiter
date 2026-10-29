@@ -287,15 +287,39 @@ def test_notifications_are_limited_per_browser_session_not_per_ip():
     assert re.search(r"limit_req_zone \$notifications_session_key zone=notifications_session_limit:\S+ rate=\d+r/m;", upstreams)
     assert re.search(r"limit_req_zone \$binary_remote_addr zone=notifications_ip_limit:\S+ rate=\d+r/m;", upstreams)
 
+    # The rate limits and proxy target live in the shared snippet all three
+    # notifications locations include (PR #870 review: de-duplicated so they
+    # can't drift apart) — checked once here, not per location.
+    common = (repo / "nginx-notifications-common.conf").read_text(encoding="utf-8")
+    assert "zone=notifications_session_limit" in common and "zone=notifications_ip_limit" in common
+    assert "api_read_limit" not in common and "api_write_limit" not in common
+    assert "proxy_pass http://airecruiter_api;" in common
+    include_line = "include /etc/nginx/snippets/airecruiter-notifications-common.conf;"
+
     conf = (repo / "nginx-app-locations.conf").read_text(encoding="utf-8")
     # Exact list path + everything under it; never a bare prefix that would
     # also catch /api/v1/notificationsX.
     assert not re.search(r"location /api/v1/notifications\s*\{", conf)
+    # The SSE stream gets its own exact-match location with the long read
+    # timeout and unbuffered proxying; the plain list and every other
+    # notifications endpoint (unread-count, mark-all-read, clear, per-id
+    # read/unread) must NOT inherit any of that just because they share the
+    # same prefix.
+    stream_loc = re.search(r"location = /api/v1/notifications/stream \{(.*?)\n    \}", conf, re.S)
+    assert stream_loc, "notifications stream location is missing"
+    stream_body = stream_loc.group(1)
+    assert include_line in stream_body
+    assert "proxy_read_timeout 86400;" in stream_body  # the SSE stream stays open
+    assert "proxy_buffering off;" in stream_body  # events reach the browser as they happen
+    assert "proxy_set_header Upgrade $http_upgrade;" in stream_body
+
     for opener in (r"location = /api/v1/notifications \{", r"location \^~ /api/v1/notifications/ \{"):
         loc = re.search(opener + r"(.*?)\n    \}", conf, re.S)
         assert loc, f"notifications location missing: {opener}"
         body = loc.group(1)
-        assert "zone=notifications_session_limit" in body and "zone=notifications_ip_limit" in body
-        assert "api_read_limit" not in body and "api_write_limit" not in body
-        assert "proxy_pass http://airecruiter_api;" in body
-        assert "proxy_read_timeout 86400;" in body  # the SSE stream stays open
+        assert include_line in body
+        # Not the SSE stream's long timeout or unbuffered proxying — only
+        # /stream (its own exact match above) needs to hold a connection
+        # open all day.
+        assert "proxy_read_timeout 86400;" not in body
+        assert "proxy_buffering off;" not in body

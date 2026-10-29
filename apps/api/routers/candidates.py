@@ -6065,31 +6065,105 @@ async def save_candidate_feedback(
                 # whatever this field happened to say before.
                 feedback_data["callback_is_reschedule"] = None
             feedback_payload = json.dumps(feedback_data)
+            # Only for Reject: lock the row for this UPDATE and hand back its
+            # PRE-write data, so the "did the reason actually change" decision
+            # below reads data guaranteed fresh at the moment of this write —
+            # not the `data_blob` resolved much earlier (step 1, its own
+            # connection, long since closed). Without this, two concurrent
+            # Reject requests for the same candidate could both read the same
+            # prior reason and both decide "changed" (duplicate JobDiva notes)
+            # or both decide "unchanged" against each other's not-yet-visible
+            # write (a dropped note for a genuine change).
+            # Scoped to Reject only, same reasoning as the Callback Scheduled
+            # comment above: FOR UPDATE here would otherwise serialize every
+            # OTHER feedback_type through this one row's lock for a race that,
+            # for them, doesn't corrupt anything the UPDATE itself doesn't
+            # already handle atomically.
+            locked_prev_data: Optional[Dict[str, Any]] = None
             if sc_row_id is not None:
-                # Fast path: update exactly the row we resolved. updated_at
-                # is set explicitly (PR #851 review) — there is no trigger
-                # on this table bumping it automatically, and
-                # notifications_service._fetch_job_and_candidate orders a
-                # multi-sourced candidate's duplicate rows by updated_at to
-                # find the one this write just touched; without this, that
-                # ordering would reflect whatever the sync pipeline last
-                # touched instead of this feedback write.
-                _cur2.execute(
-                    "UPDATE sourced_candidates SET data = data || %s::jsonb, updated_at = now() WHERE id = %s",
-                    (feedback_payload, sc_row_id)
-                )
+                if request.feedback_type == "Reject":
+                    _cur2.execute(
+                        """UPDATE sourced_candidates
+                              SET data = data || %s::jsonb, updated_at = now()
+                            FROM (SELECT data FROM sourced_candidates WHERE id = %s FOR UPDATE) AS prev
+                            WHERE sourced_candidates.id = %s
+                            RETURNING prev.data AS prev_data""",
+                        (feedback_payload, sc_row_id, sc_row_id)
+                    )
+                    row = _cur2.fetchone()
+                    locked_prev_data = row[0] if row else None
+                else:
+                    # Fast path: update exactly the row we resolved. updated_at
+                    # is set explicitly (PR #851 review) — there is no trigger
+                    # on this table bumping it automatically, and
+                    # notifications_service._fetch_job_and_candidate orders a
+                    # multi-sourced candidate's duplicate rows by updated_at to
+                    # find the one this write just touched; without this, that
+                    # ordering would reflect whatever the sync pipeline last
+                    # touched instead of this feedback write.
+                    _cur2.execute(
+                        "UPDATE sourced_candidates SET data = data || %s::jsonb, updated_at = now() WHERE id = %s",
+                        (feedback_payload, sc_row_id)
+                    )
             else:
-                # Fallback: match by candidate_id + job ref
-                _cur2.execute(
-                    """UPDATE sourced_candidates
-                          SET data = data || %s::jsonb, updated_at = now()
-                        WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
-                          AND (jobdiva_id = %s
-                               OR jobdiva_id IN (
-                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
-                               ))""",
-                    (feedback_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
-                )
+                # Fallback: match by candidate_id + job ref. This can match
+                # more than one row — a multi-sourced candidate (JobDiva +
+                # LinkedIn + manual, …) has one sourced_candidates row per
+                # channel (see sourced_candidate_dedup's own docstring) — and
+                # the UPDATE above has always written all of them, unchanged
+                # here. The lock subquery below only has to get two things
+                # right for the NEW Reject-only lock: a deterministic
+                # acquisition order (so two concurrent requests matching the
+                # same duplicate rows lock them in the same order and one
+                # waits instead of both deadlocking), and a deliberate choice
+                # of which matched row's pre-write state feeds the "did the
+                # reason change" decision, instead of whichever row the
+                # driver happens to return first.
+                if request.feedback_type == "Reject":
+                    _cur2.execute(
+                        """UPDATE sourced_candidates
+                              SET data = data || %s::jsonb, updated_at = now()
+                            FROM (
+                                SELECT id, data, updated_at FROM sourced_candidates
+                                WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
+                                  AND (jobdiva_id = %s
+                                       OR jobdiva_id IN (
+                                             SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+                                       ))
+                                ORDER BY id
+                                FOR UPDATE
+                            ) AS prev
+                            WHERE sourced_candidates.id = prev.id
+                            RETURNING prev.id AS prev_id, prev.data AS prev_data, prev.updated_at AS prev_updated_at""",
+                        (feedback_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
+                    )
+                    # Same tiebreak tail as CALLBACK_ROW_TIEBREAKER (most
+                    # recently touched, then highest id) — not that constant
+                    # itself, since its callback-scheduled preference has no
+                    # bearing on which row's REJECT state is "current" here.
+                    rows = _cur2.fetchall()
+                    locked_prev_data = None
+                    if rows:
+                        best = max(
+                            rows,
+                            key=lambda r: (r[2] or datetime.min.replace(tzinfo=timezone.utc), r[0]),
+                        )
+                        locked_prev_data = best[1]
+                else:
+                    _cur2.execute(
+                        """UPDATE sourced_candidates
+                              SET data = data || %s::jsonb, updated_at = now()
+                            WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
+                              AND (jobdiva_id = %s
+                                   OR jobdiva_id IN (
+                                         SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+                                   ))""",
+                        (feedback_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
+                    )
+            if request.feedback_type == "Reject":
+                # isinstance guard mirrors step 1's own data_blob parsing
+                # above — same column, same driver, same possible shapes.
+                locked_prev_data = locked_prev_data if isinstance(locked_prev_data, dict) else _json_load_safe(locked_prev_data, {})
             if request.feedback_type == "Callback Scheduled":
                 # Queued on this same cursor/transaction (see task_outbox's own
                 # docstring) so the reminder and the feedback write commit or
@@ -6218,34 +6292,39 @@ async def save_candidate_feedback(
     # its own new JobDiva note (never edited/replaced, per product: JobDiva
     # notes are an append-only history), but re-confirming the SAME reason
     # that's already on file (e.g. a reopened-then-cancelled-then-reopened
-    # modal re-submitted as-is) must not spam a duplicate note. data_blob is
-    # this row's PRE-write state (captured above, before step 3's merge), so
-    # comparing against it — not request.reason alone — is what tells
-    # "unchanged" apart from "first rejection" or "changed from one reason
-    # to another" (both of which must still create a note).
+    # modal re-submitted as-is) must not spam a duplicate note. Comparing
+    # against the row-locked pre-write snapshot from step 3 above (not
+    # request.reason alone) is what tells "unchanged" apart from "first
+    # rejection" or "changed from one reason to another" (both of which
+    # must still create a note).
     #
-    # PR #868 review: also require feedback_synced — if the PRIOR reject's
-    # own create_candidate_note call failed, that prior attempt never made it
+    # Also requires feedback_synced: if the PRIOR reject's own
+    # create_candidate_note call failed, that prior attempt never made it
     # into JobDiva at all, so a recruiter re-submitting the exact same reason
     # is retrying a failed sync, not re-confirming a no-op. Skipping it then
     # would report success while leaving JobDiva permanently out of sync.
     #
-    # PR #868 review: the comparison below is deliberately exact-after-strip,
-    # not case- or internal-whitespace-insensitive. request.reason only ever
-    # reaches here as one of RejectionReasonSelect's fixed, enumerated option
-    # strings (apps/web/lib/rejection.ts), never free text a recruiter could
-    # mistype with different casing/spacing — so looser normalization would
-    # only paper over a genuinely new, unmapped reason string reaching this
+    # The comparison below is deliberately exact-after-strip, not case- or
+    # internal-whitespace-insensitive. request.reason only ever reaches here
+    # as one of RejectionReasonSelect's fixed, enumerated option strings
+    # (apps/web/lib/rejection.ts), never free text a recruiter could mistype
+    # with different casing/spacing — so looser normalization would only
+    # paper over a genuinely new, unmapped reason string reaching this
     # endpoint directly (bypassing the UI), which should fail loud via
     # REJECTION_REASON_TO_JOBDIVA_ACTION's own 422 above, not be silently
     # treated as "unchanged".
-    prior_reject_reason = str(data_blob.get("feedback_reason") or "").strip()
+    # The row-locked pre-write snapshot from step 3 above (Reject only) —
+    # not data_blob, which was resolved back in step 1, in a different,
+    # already-closed connection/transaction, and can be stale by the time
+    # this runs (see the FOR UPDATE comment at that UPDATE for why).
+    _reject_prior = locked_prev_data or {}
+    prior_reject_reason = str(_reject_prior.get("feedback_reason") or "").strip()
     new_reject_reason = str(request.reason or "").strip()
     reject_reason_unchanged = (
         request.feedback_type == "Reject"
-        and str(data_blob.get("feedback_type") or "") == "Reject"
+        and str(_reject_prior.get("feedback_type") or "") == "Reject"
         and prior_reject_reason == new_reject_reason
-        and bool(data_blob.get("feedback_synced"))
+        and bool(_reject_prior.get("feedback_synced"))
     )
     # Distinct from reject_reason_unchanged: this is true only when the
     # candidate was already rejected for a DIFFERENT, non-empty reason and is
@@ -6257,7 +6336,7 @@ async def save_candidate_feedback(
     # unrelated first-time rejection.
     is_rejection_reason_change = (
         request.feedback_type == "Reject"
-        and str(data_blob.get("feedback_type") or "") == "Reject"
+        and str(_reject_prior.get("feedback_type") or "") == "Reject"
         and bool(prior_reject_reason)
         and prior_reject_reason != new_reject_reason
     )

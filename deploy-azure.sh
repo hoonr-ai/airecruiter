@@ -355,6 +355,13 @@ sudo mkdir -p /etc/nginx/snippets
 sudo cp "$PROJECT_DIR/nginx-app-locations.conf" /etc/nginx/snippets/airecruiter-app.conf
 print_status "Nginx shared application snippet installed"
 
+# Shared proxy/rate-limit directives for the three /api/v1/notifications*
+# locations inside airecruiter-app.conf above (the exact list, the catch-all,
+# and the SSE stream) so they can't drift apart on those. Installed here,
+# before airecruiter-app.conf's own `include` of it is ever tested/loaded.
+sudo cp "$PROJECT_DIR/nginx-notifications-common.conf" /etc/nginx/snippets/airecruiter-notifications-common.conf
+print_status "Nginx shared notifications snippet installed"
+
 # Shared upstream/limit_req_zone directives, included at the top level by both
 # nginx.conf and nginx-bootstrap.conf. Must be installed before either config
 # is tested/loaded, since the locations above proxy_pass/limit_req against

@@ -15,15 +15,47 @@ from models import CandidateFeedbackRequest
 
 
 class _FakeCursor:
-    def __init__(self, select_row=None):
+    def __init__(self, select_row=None, select_rows=None):
         self.select_row = select_row
+        # Several real sourced_candidates rows for one candidate+job (a
+        # multi-sourced candidate — JobDiva + LinkedIn + manual, …), each
+        # (id, data, updated_at), for the fallback Reject lock's fetchall().
+        # Falls back to wrapping select_row as the sole row when not given,
+        # so every existing single-row test needs no changes.
+        self.select_rows = select_rows
         self.executed_queries = []
+        self._last_query = ""
 
     def execute(self, query, params=None):
         self.executed_queries.append((query, params))
+        self._last_query = query
+
+    # Keyed on "FOR UPDATE" (present on both Reject row-lock queries) rather
+    # than exact RETURNING column text — survives the lock SQL growing or
+    # reordering columns, unlike matching the old literal "RETURNING
+    # prev.data" substring (PR #870 review: flagged as brittle, and it had
+    # in fact already gone stale against the fallback path's own RETURNING
+    # once that grew prev.id/prev.updated_at for the ordering fix below).
+    def _is_lock_query(self) -> bool:
+        return "FOR UPDATE" in self._last_query
 
     def fetchone(self):
+        # The sc_row_id fast-path Reject lock always targets exactly one
+        # row, so it returns a single `prev.data` column — not the
+        # multi-column row the initial candidate-resolution SELECT returns.
+        if self._is_lock_query():
+            return (self.select_row[3],) if self.select_row else None
         return self.select_row
+
+    def fetchall(self):
+        # The fallback Reject lock (candidate_id/jobdiva_id match) can lock
+        # more than one duplicate row; the real query returns one
+        # (id, data, updated_at) row per match.
+        if self._is_lock_query():
+            if self.select_rows is not None:
+                return [(r[0], r[3], r[8] if len(r) > 8 else None) for r in self.select_rows]
+            return [(self.select_row[0], self.select_row[3], None)] if self.select_row else []
+        return [self.select_row] if self.select_row else []
 
     def __enter__(self):
         return self
@@ -33,8 +65,9 @@ class _FakeCursor:
 
 
 class _FakeConnection:
-    def __init__(self, select_row=None):
+    def __init__(self, select_row=None, select_rows=None):
         self.select_row = select_row
+        self.select_rows = select_rows
         self.committed = False
         self.closed = False
         # save_candidate_feedback opens several get_db_connection() calls
@@ -43,7 +76,7 @@ class _FakeConnection:
         self.cursors = []
 
     def cursor(self):
-        cur = _FakeCursor(self.select_row)
+        cur = _FakeCursor(self.select_row, self.select_rows)
         self.cursors.append(cur)
         return cur
 
@@ -89,12 +122,12 @@ _FAKE_CAND_ROW_WITH_DONE_CALLBACK = (
 )
 
 
-def _base_setup(monkeypatch, select_row=_FAKE_CAND_ROW):
+def _base_setup(monkeypatch, select_row=_FAKE_CAND_ROW, select_rows=None):
     from routers import candidates as cand_module
     from services.jobdiva import jobdiva_service
 
     monkeypatch.setattr(cand_module, "_verify_job_access_by_id", lambda *a, **kw: None)
-    fake_conn = _FakeConnection(select_row=select_row)
+    fake_conn = _FakeConnection(select_row=select_row, select_rows=select_rows)
     monkeypatch.setattr(cand_module, "get_db_connection", lambda: fake_conn)
     monkeypatch.setattr(cand_module, "refresh_feedback_metrics_sync", lambda job_ref: {"feedback_completed": 1, "pair_submits": 0})
 

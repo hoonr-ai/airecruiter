@@ -288,6 +288,15 @@ def _mark_redis_down(exc: Exception) -> None:
     _redis_down_until = time.monotonic() + _REDIS_RETRY_S
 
 
+def is_redis_marked_down() -> bool:
+    """True while Redis is being skipped after a recent error (see
+    _mark_redis_down) — the same window _get_redis() itself checks. Public:
+    other modules (services/jobdiva.py's own read-cache helpers) rate-limit
+    their own logging against this same window and shouldn't reach into
+    _redis_down_until directly."""
+    return time.monotonic() < _redis_down_until
+
+
 def _get_local_lock() -> asyncio.Lock:
     global _local_lock
     loop = asyncio.get_running_loop()
