@@ -21,13 +21,19 @@ LOCK_NAME = "monitored_jobs_write"
 WRITE_LOCK_TIMEOUT_MS = 6000
 
 
-def lock_for_write(cur: Any, restore_lock_timeout_ms: int) -> None:
+def lock_for_write(cur: Any) -> None:
     """Take the exclusive lock in the caller's transaction (released at
-    commit/rollback). Raises on timeout like any lock_timeout. Leaves
-    lock_timeout at ``restore_lock_timeout_ms`` for the statements after."""
+    commit/rollback). Raises on timeout like any lock_timeout, and puts back
+    whatever lock_timeout the transaction had for the statements after.
+
+    Held until commit, so callers take it right before their write and commit
+    right after — no JobDiva call or other await in between, or every
+    warmer would skip while it waits."""
+    cur.execute("SELECT current_setting('lock_timeout')")
+    previous = cur.fetchone()[0]
     cur.execute("SET LOCAL lock_timeout = %s", (f"{WRITE_LOCK_TIMEOUT_MS}ms",))
     cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (LOCK_NAME,))
-    cur.execute("SET LOCAL lock_timeout = %s", (f"{int(restore_lock_timeout_ms)}ms",))
+    cur.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
 
 
 def try_lock_for_read(cur: Any) -> bool:

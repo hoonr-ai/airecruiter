@@ -71,6 +71,7 @@ import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
+import { ChangeRejectionReasonButton } from "@/components/ChangeRejectionReasonButton";
 import { formatEasternDateTime, withEasternLabel } from "@/lib/date";
 import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 import { useActiveTime } from "@/hooks/use-active-time";
@@ -3250,6 +3251,17 @@ export default function CandidateRankingsPage() {
                                     </div>
                                   );
                                 })()}
+                                {feedbacks[candidate.id] === 'Reject' && (
+                                  <ChangeRejectionReasonButton
+                                    candidateName={candidate.name}
+                                    disabled={syncingCandidateId === candidate.id}
+                                    onClick={() => {
+                                      setActionCandidateId(candidate.id);
+                                      setRejectReason(feedbackReasons[candidate.id] || "");
+                                      setIntegrationModalOpen('reject');
+                                    }}
+                                  />
+                                )}
                               </div>
                             )}
                           </div>

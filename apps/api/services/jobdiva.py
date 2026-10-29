@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import binascii
 import functools
 import http.cookiejar
 import inspect
@@ -26,6 +27,7 @@ from core import (
     JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL,
     JOBDIVA_PAIR_RESUME_SOURCE_NAMES,
     DEFAULT_SCREENING_LEVEL,
+    JOBDIVA_READ_CACHE_TTL_S as _READ_CACHE_TTL_S,
 )
 from services.location_type import resolve_location_type
 from core import config as _core_config
@@ -46,11 +48,9 @@ _BI_WORKER_SEMAPHORE: Optional[asyncio.Semaphore] = None
 # a dashboard, a tracker and a metrics refresh asking for the same record
 # within seconds share one JobDiva call. Errors are never cached.
 # JOBDIVA_READ_CACHE_TTL_S=0 disables it. Small on purpose: these are full
-# JobDiva payloads, and worker memory is the thing being saved.
-try:
-    _READ_CACHE_TTL_S = float((os.getenv("JOBDIVA_READ_CACHE_TTL_S") or "").strip() or 30)
-except ValueError:
-    _READ_CACHE_TTL_S = 30.0
+# JobDiva payloads, and worker memory is the thing being saved. Parsed in
+# core/config.py (imported above as _READ_CACHE_TTL_S) for consistency with
+# every other env-backed setting.
 _read_cache = AsyncTTLCache(maxsize=200, ttl_s=_READ_CACHE_TTL_S)
 
 # Read-after-write across the 8 workers: every JobDiva write bumps a
@@ -81,7 +81,12 @@ async def _read_cache_token(kind: str, ident: Any) -> Any:
         return tuple(_local_read_gens.get(n, 0) for n in names)
     try:
         return tuple(await client.mget([_READ_GEN_PREFIX + n for n in names]))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — fail-open: a cache-token lookup must never block the real JobDiva call
+        # Same rate limit _mark_redis_down's own WARNING already uses — logging
+        # this debug-level detail on every call during a sustained outage
+        # would otherwise spam right alongside it.
+        if not _bi_rate_limit.is_redis_marked_down():
+            logger.debug("jobdiva read-cache token lookup failed (Redis): %s", exc)
         _bi_rate_limit._mark_redis_down(exc)
         return BYPASS
 
@@ -99,7 +104,9 @@ async def _bump_read_gens(names: List[str]) -> None:
             pipe.incr(_READ_GEN_PREFIX + n)
             pipe.expire(_READ_GEN_PREFIX + n, _READ_GEN_TTL_S)
         await pipe.execute()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — never raises: a failed bump must not fail the write
+        if not _bi_rate_limit.is_redis_marked_down():
+            logger.debug("jobdiva read-cache generation bump failed (Redis): %s", exc)
         _bi_rate_limit._mark_redis_down(exc)
 
 
@@ -337,6 +344,17 @@ class _SharedJDClient:
     def stream(self, method: str, url: Any, **kwargs: Any):
         kwargs.setdefault("timeout", self._timeout)
         return _shared_jd_client().stream(method, url, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        # Deliberately no pass-through: client state (headers, cookies, event
+        # hooks) is shared by every caller on the worker, so changing it from
+        # one call would leak into all the others. Per-call options go on the
+        # request (headers=..., params=...). A call site needing more should
+        # construct with other arguments, which gets its own client.
+        raise AttributeError(
+            f"{name!r} is not available on the shared JobDiva client "
+            f"(services.jobdiva._SharedJDClient): pass per-request options instead"
+        )
 
 
 def _jd_async_client(*args: Any, **kwargs: Any) -> Any:
@@ -1504,6 +1522,97 @@ def normalize_employment_type(emp_type: str) -> str:
     
     # Return original if no mapping found
     return emp_type
+
+
+# Guardrails for forwarding a JobDiva-supplied resume FILE (not parsed text)
+# straight into a recruiter email attachment: the filename and bytes come
+# from an external system and must not be trusted as-is.
+_ALLOWED_RESUME_EXTENSIONS = {".pdf", ".doc", ".docx", ".rtf", ".txt"}
+_MAX_RESUME_ATTACHMENT_BYTES = 3 * 1024 * 1024  # ~Graph API attachment ceiling
+_SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9 ._()\-]")
+
+
+_OLE_SIGNATURE = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"
+_ZIP_SIGNATURE = b"PK\x03\x04"
+_PDF_SIGNATURE = b"%PDF-"
+_UTF_BOMS = (b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")
+
+
+def _strip_bom_and_leading_ws(content: bytes) -> bytes:
+    """Drop a leading UTF-8/16 BOM, then leading ASCII whitespace — real
+    resume files (PR #870 review) can have either before their actual magic
+    bytes, which a bare `startswith` would otherwise reject."""
+    for bom in _UTF_BOMS:
+        if content.startswith(bom):
+            content = content[len(bom):]
+            break
+    return content.lstrip(b" \t\r\n")
+
+
+def _content_matches_resume_extension(content: bytes, ext: str) -> bool:
+    """True if `content`'s own magic bytes are plausible for `ext`: the
+    extension alone comes from an externally-supplied filename, so a row
+    claiming e.g. .pdf whose content is something else entirely would
+    otherwise be attached to a recruiter email as-is, extension and content
+    mismatched.
+
+    Deliberately permissive per format (PR #870 review: an earlier, stricter
+    version rejected real-world resumes and silently fell back to the
+    generated .doc, losing the candidate's original formatting):
+    """
+    if ext == ".pdf":
+        # The PDF spec allows the header anywhere in the first 1024 bytes —
+        # some generators emit leading whitespace or a BOM before it.
+        return _PDF_SIGNATURE in content[:1024]
+    if ext == ".docx":
+        # DOCX (and any other OOXML/ZIP container) is a ZIP archive.
+        return content[:4] == _ZIP_SIGNATURE
+    if ext == ".doc":
+        # Many files named .doc are actually RTF or OOXML saved with the old
+        # extension — Word opens all three. Accept the legacy OLE/CFBF
+        # signature, a ZIP/OOXML one, or RTF's.
+        return (
+            content[:8] == _OLE_SIGNATURE
+            or content[:4] == _ZIP_SIGNATURE
+            or _strip_bom_and_leading_ws(content[:1024]).startswith(b"{\\rtf")
+        )
+    if ext == ".rtf":
+        return _strip_bom_and_leading_ws(content[:1024]).startswith(b"{\\rtf")
+    if ext == ".txt":
+        # Plain text has no magic bytes of its own. A UTF-16 file is
+        # legitimately full of NUL bytes (every other byte, for ASCII-range
+        # characters) but starts with a BOM when properly marked — checked
+        # first and accepted outright, rather than falling into the NUL
+        # check below and being mistaken for binary. Without a BOM, reject
+        # anything that actually matches one of the binary signatures above
+        # (a mislabeled file) or contains a NUL byte (never valid in
+        # BOM-less text).
+        if content[:2] in (b"\xff\xfe", b"\xfe\xff") or content[:3] == b"\xef\xbb\xbf":
+            return True
+        return not (
+            b"\x00" in content[:4096]
+            or content[:8] == _OLE_SIGNATURE
+            or content[:4] == _ZIP_SIGNATURE
+            or content[:5] == _PDF_SIGNATURE
+        )
+    return True
+
+
+def _sanitize_resume_filename(raw_filename: str, max_length: int = 150) -> str:
+    """Make an externally-supplied filename safe to use as an email attachment name.
+
+    Strips any path component, control characters, and anything outside a
+    conservative allowlist, then caps the length (preserving the extension).
+    """
+    name = os.path.basename((raw_filename or "").strip().replace("\\", "/"))
+    name = _SAFE_FILENAME_CHARS.sub("_", name).strip(" ._") or "resume"
+
+    if len(name) > max_length:
+        stem, ext = os.path.splitext(name)
+        name = stem[: max(1, max_length - len(ext))] + ext
+
+    return name
+
 
 class JobDivaService:
     def _extract_customer_from_description(self, description: str) -> str:
@@ -3792,9 +3901,91 @@ class JobDivaService:
         candidate_info["resume_text"] = resume_text or "Resume content unavailable"
         candidate_info["resume_id"] = selected_resume_id
         candidate_info["resume_count"] = 1 if resume_text else 0
-        
+
         return self._format_candidate_resume(candidate_info)
-    
+
+    async def get_resume_file(self, resume_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch the original resume FILE (not parsed text) for a resume ID.
+
+        This is the same file JobDiva's own "Open Resume" button downloads —
+        e.g. the PDF/DOCX as the candidate submitted it — via the
+        ResumeDetail BI endpoint's FILECONTENT_BASE64ENCODED field.
+
+        Returns None (letting the caller fall back to the generated .doc) if
+        the file is missing, malformed, an unexpected type, or too large to
+        email as an attachment.
+        """
+        if not resume_id:
+            return None
+
+        token = await self.authenticate()
+        if not token:
+            logger.warning(f"JobDiva authentication failed fetching resume file {resume_id}")
+            return None
+
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await _bi_rate_limit.bi_get(
+                    client, f"{self.api_url}/apiv2/bi/ResumeDetail", max_wait_s=30.0,
+                    label="ResumeDetail:file", params={"resumeId": resume_id}, headers=headers,
+                )
+
+                if response is None or response.status_code != 200:
+                    logger.warning(f"ResumeDetail file fetch failed for {resume_id}: {getattr(response, 'status_code', None)}")
+                    return None
+
+                data = response.json()
+                rows = data.get("data") if isinstance(data, dict) else None
+                row = rows[0] if isinstance(rows, list) and rows else (rows if isinstance(rows, dict) else None)
+                if not row:
+                    return None
+
+                raw_filename = row.get("FILENAME")
+                b64_content = row.get("FILECONTENT_BASE64ENCODED")
+                if not raw_filename or not b64_content:
+                    return None
+
+                filename = _sanitize_resume_filename(raw_filename)
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in _ALLOWED_RESUME_EXTENSIONS:
+                    logger.warning(
+                        f"ResumeDetail file for {resume_id} has unexpected extension {ext!r}; "
+                        "falling back to generated doc"
+                    )
+                    return None
+
+                try:
+                    content = base64.b64decode(b64_content, validate=True)
+                except (binascii.Error, ValueError) as decode_err:
+                    logger.warning(f"ResumeDetail returned malformed base64 for {resume_id}: {decode_err}")
+                    return None
+
+                if not _content_matches_resume_extension(content, ext):
+                    logger.warning(
+                        f"ResumeDetail file for {resume_id} claims extension {ext!r} but its "
+                        f"content's magic bytes ({content[:8]!r}) don't match that format; "
+                        "falling back to generated doc"
+                    )
+                    return None
+
+                if len(content) > _MAX_RESUME_ATTACHMENT_BYTES:
+                    logger.warning(
+                        f"ResumeDetail file for {resume_id} is {len(content)} bytes, "
+                        f"over the {_MAX_RESUME_ATTACHMENT_BYTES}-byte attachment limit; "
+                        "falling back to generated doc"
+                    )
+                    return None
+
+                return {
+                    "filename": filename,
+                    "content": content,
+                }
+        except Exception as e:
+            logger.warning(f"Error fetching resume file for resume_id {resume_id}: {e}")
+            return None
+
     def _format_candidate_resume(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """Format candidate data for resume display."""
         # Extract basic info using multiple possible field names

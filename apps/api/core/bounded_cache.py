@@ -20,7 +20,20 @@ class BoundedDict(OrderedDict):
 
     def __getitem__(self, key: Hashable) -> Any:
         value = super().__getitem__(key)
-        self.move_to_end(key)
+        # Not self.move_to_end(key): confirmed by direct testing (not a
+        # documented CPython internal, so stated as observed behavior, not a
+        # claimed mechanism) that calling it here makes dict.pop() on this
+        # same key raise a spurious KeyError for a key that is actually
+        # still present — pop()'s own lookup/relink and this call's relink
+        # land on the same OrderedDict machinery while pop() is still
+        # mid-call. Calling OrderedDict's own __delitem__ + __setitem__
+        # directly (neither overridden here) moves the key to the end
+        # without going through move_to_end at all, which doesn't hit this.
+        # Not atomic against a concurrent reader between the two calls, but
+        # per this module's own docstring these caches are event-loop-only,
+        # never touched from more than one thread.
+        OrderedDict.__delitem__(self, key)
+        OrderedDict.__setitem__(self, key, value)
         return value
 
     def get(self, key: Hashable, default: Any = None) -> Any:
@@ -89,6 +102,10 @@ class AsyncTTLCache:
         if pending is not None and pending[0] is loop:
             return copy.deepcopy(await asyncio.shield(pending[1]))
         task = loop.create_task(loader())
+        # If every caller waiting on it is cancelled, nobody awaits the task:
+        # retrieve its outcome so a failure isn't logged as "Task exception
+        # was never retrieved".
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
         self._loading[flight] = (loop, task)
         try:
             value = await asyncio.shield(task)

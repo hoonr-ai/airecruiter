@@ -24,6 +24,7 @@ import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { RejectionReasonSelect } from "@/components/RejectionReasonSelect";
+import { ChangeRejectionReasonButton } from "@/components/ChangeRejectionReasonButton";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import {
   Select,
@@ -1479,6 +1480,17 @@ export default function GlobalCandidatesPage() {
                                 <div className="max-w-[200px] text-[10px] text-slate-400 font-medium text-center break-all" title={c.feedback_by}>
                                   by {c.feedback_by}
                                 </div>
+                              )}
+                              {feedback === 'Reject' && (
+                                <ChangeRejectionReasonButton
+                                  candidateName={c.name}
+                                  disabled={syncingCandidateId === c.id}
+                                  onClick={() => {
+                                    setActionCandidateId(c.id);
+                                    setRejectReason(c.feedback_reason || "");
+                                    setIntegrationModalOpen('reject');
+                                  }}
+                                />
                               )}
                             </div>
                           )}

@@ -1313,7 +1313,7 @@ class AutoAssignService:
                     differs_sql = " OR ".join(f"{col} IS DISTINCT FROM %s" for col, _ in assignments)
                     values = [value for _, value in assignments]
                     # Never alongside the dashboard cache warmer's read.
-                    monitored_jobs_lock.lock_for_write(cur, restore_lock_timeout_ms=2000)
+                    monitored_jobs_lock.lock_for_write(cur)
                     cur.execute(
                         f"UPDATE monitored_jobs SET {set_sql}, updated_at = NOW() "
                         f"WHERE job_id = %s AND ({differs_sql})",
