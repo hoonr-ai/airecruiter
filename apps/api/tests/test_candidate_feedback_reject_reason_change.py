@@ -185,3 +185,57 @@ async def test_changed_reason_note_is_never_pinned(monkeypatch):
     assert res["status"] == "success"
     assert len(jobdiva_calls) == 1
     assert len(pin_calls) == 0
+
+
+@pytest.mark.anyio
+async def test_reject_update_locks_the_row_before_deciding(monkeypatch):
+    """PR #869 review (medium): the "unchanged vs changed" decision and the
+    write must happen atomically, or two concurrent Reject requests for the
+    same candidate could both read the same prior reason and both decide
+    "changed" (duplicate JobDiva notes) or both decide "unchanged" against
+    each other's not-yet-visible write (a dropped note for a real change).
+    Regression guard: the UPDATE for a Reject must take the row lock (FOR
+    UPDATE) and read its pre-write state back atomically (RETURNING), not
+    rely on the far-earlier, separately-connected/transacted `data_blob`
+    from step 1."""
+    cand_module, _jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_ALREADY_REJECTED,
+    )
+
+    await _reject(cand_module, "Communication skills")
+
+    # Step 3's feedback write specifically (bumps updated_at) — distinct from
+    # the later feedback_synced marker update on a successful JobDiva sync,
+    # which also matches "UPDATE sourced_candidates" but isn't what this
+    # guards.
+    update_calls = [
+        query for cur in fake_conn.cursors for query, _params in cur.executed_queries
+        if "UPDATE sourced_candidates" in query and "updated_at = now()" in query
+    ]
+    assert len(update_calls) == 1
+    assert "FOR UPDATE" in update_calls[0]
+    assert "RETURNING prev.data" in update_calls[0]
+
+
+@pytest.mark.anyio
+async def test_non_reject_feedback_does_not_lock_the_row(monkeypatch):
+    """The row lock above is scoped to Reject only — same reasoning as the
+    Callback Scheduled "read without FOR UPDATE" comment earlier in this
+    file: locking here too would serialize every OTHER feedback_type
+    through this one row's lock for a race that, for them, doesn't corrupt
+    anything the UPDATE's own atomic JSONB merge doesn't already handle."""
+    cand_module, _jobdiva_calls, fake_conn = _base_setup(monkeypatch)
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    request = CandidateFeedbackRequest(feedback_type="Unreachable")
+
+    await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=BackgroundTasks(), user=user,
+    )
+
+    update_calls = [
+        query for cur in fake_conn.cursors for query, _params in cur.executed_queries
+        if "UPDATE sourced_candidates" in query
+    ]
+    assert len(update_calls) == 1
+    assert "FOR UPDATE" not in update_calls[0]

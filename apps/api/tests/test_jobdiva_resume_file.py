@@ -107,11 +107,75 @@ def test_get_resume_file_returns_none_on_disallowed_extension(monkeypatch):
 
 def test_get_resume_file_returns_none_when_over_size_limit(monkeypatch):
     _patch_auth(monkeypatch)
-    big = base64.b64encode(b"x" * (jobdiva._MAX_RESUME_ATTACHMENT_BYTES + 1)).decode()
+    # Valid PDF magic bytes (PR #869 review's content-matches-extension check
+    # would otherwise reject this for the wrong reason before the size check
+    # ever runs, silently dropping this test's actual coverage).
+    big = base64.b64encode(b"%PDF-1.7\n" + b"x" * (jobdiva._MAX_RESUME_ATTACHMENT_BYTES + 1)).decode()
     _patch_bi_get(monkeypatch, httpx.Response(200, json={
         "data": [{"FILENAME": "resume.pdf", "FILECONTENT_BASE64ENCODED": big}]
     }))
     assert _run(svc.get_resume_file("123_1_1")) is None
+
+
+# --- content-matches-extension (PR #869 review) --------------------------
+# The extension alone comes from an externally-supplied filename; a row
+# claiming e.g. .pdf whose content is something else entirely would
+# otherwise be attached to a recruiter email as-is.
+
+def test_get_resume_file_returns_none_on_pdf_extension_with_non_pdf_content(monkeypatch):
+    _patch_auth(monkeypatch)
+    content = base64.b64encode(b"this is not a pdf").decode()
+    _patch_bi_get(monkeypatch, httpx.Response(200, json={
+        "data": [{"FILENAME": "resume.pdf", "FILECONTENT_BASE64ENCODED": content}]
+    }))
+    assert _run(svc.get_resume_file("123_1_1")) is None
+
+
+def test_get_resume_file_returns_none_on_docx_extension_with_non_zip_content(monkeypatch):
+    _patch_auth(monkeypatch)
+    content = base64.b64encode(b"not a zip/docx").decode()
+    _patch_bi_get(monkeypatch, httpx.Response(200, json={
+        "data": [{"FILENAME": "resume.docx", "FILECONTENT_BASE64ENCODED": content}]
+    }))
+    assert _run(svc.get_resume_file("123_1_1")) is None
+
+
+def test_get_resume_file_returns_none_on_doc_extension_with_non_ole_content(monkeypatch):
+    _patch_auth(monkeypatch)
+    content = base64.b64encode(b"not an OLE compound file").decode()
+    _patch_bi_get(monkeypatch, httpx.Response(200, json={
+        "data": [{"FILENAME": "resume.doc", "FILECONTENT_BASE64ENCODED": content}]
+    }))
+    assert _run(svc.get_resume_file("123_1_1")) is None
+
+
+def test_get_resume_file_returns_none_on_txt_extension_with_pdf_content(monkeypatch):
+    """A mislabeled .txt whose actual content is one of the binary formats
+    above — distinct from the other mismatch tests since .txt otherwise has
+    no magic bytes of its own to check positively."""
+    _patch_auth(monkeypatch)
+    content = base64.b64encode(b"%PDF-1.7\nactually a pdf").decode()
+    _patch_bi_get(monkeypatch, httpx.Response(200, json={
+        "data": [{"FILENAME": "resume.txt", "FILECONTENT_BASE64ENCODED": content}]
+    }))
+    assert _run(svc.get_resume_file("123_1_1")) is None
+
+
+def test_get_resume_file_accepts_matching_docx_doc_rtf_txt_content(monkeypatch):
+    cases = [
+        ("resume.docx", b"PK\x03\x04fake docx zip bytes"),
+        ("resume.doc", b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1fake ole bytes"),
+        ("resume.rtf", b"{\\rtf1\\ansi fake rtf content}"),
+        ("resume.txt", b"Plain resume text, no binary signature at all."),
+    ]
+    for filename, raw_bytes in cases:
+        _patch_auth(monkeypatch)
+        content = base64.b64encode(raw_bytes).decode()
+        _patch_bi_get(monkeypatch, httpx.Response(200, json={
+            "data": [{"FILENAME": filename, "FILECONTENT_BASE64ENCODED": content}]
+        }))
+        result = _run(svc.get_resume_file("123_1_1"))
+        assert result == {"filename": filename, "content": raw_bytes}, filename
 
 
 def test_get_resume_file_happy_path_returns_sanitized_filename_and_bytes(monkeypatch):

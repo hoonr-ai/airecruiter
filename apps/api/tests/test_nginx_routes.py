@@ -291,6 +291,16 @@ def test_notifications_are_limited_per_browser_session_not_per_ip():
     # Exact list path + everything under it; never a bare prefix that would
     # also catch /api/v1/notificationsX.
     assert not re.search(r"location /api/v1/notifications\s*\{", conf)
+    # The SSE stream gets its own exact-match location with the long read
+    # timeout; the plain list and every other notifications endpoint
+    # (unread-count, mark-all-read, clear, per-id read/unread) must NOT
+    # inherit that 86400s timeout just because they share the same prefix.
+    stream_loc = re.search(r"location = /api/v1/notifications/stream \{(.*?)\n    \}", conf, re.S)
+    assert stream_loc, "notifications stream location is missing"
+    stream_body = stream_loc.group(1)
+    assert "zone=notifications_session_limit" in stream_body and "zone=notifications_ip_limit" in stream_body
+    assert "proxy_read_timeout 86400;" in stream_body  # the SSE stream stays open
+
     for opener in (r"location = /api/v1/notifications \{", r"location \^~ /api/v1/notifications/ \{"):
         loc = re.search(opener + r"(.*?)\n    \}", conf, re.S)
         assert loc, f"notifications location missing: {opener}"
@@ -298,4 +308,6 @@ def test_notifications_are_limited_per_browser_session_not_per_ip():
         assert "zone=notifications_session_limit" in body and "zone=notifications_ip_limit" in body
         assert "api_read_limit" not in body and "api_write_limit" not in body
         assert "proxy_pass http://airecruiter_api;" in body
-        assert "proxy_read_timeout 86400;" in body  # the SSE stream stays open
+        # Not the SSE stream's long timeout — only /stream (its own exact
+        # match above) needs to hold a connection open all day.
+        assert "proxy_read_timeout 86400;" not in body

@@ -20,7 +20,15 @@ class BoundedDict(OrderedDict):
 
     def __getitem__(self, key: Hashable) -> Any:
         value = super().__getitem__(key)
-        self.move_to_end(key)
+        # Not self.move_to_end(key): OrderedDict.move_to_end's generic path
+        # for a subclass (not an exact OrderedDict) re-enters __getitem__ to
+        # re-fetch the value before relinking it — recursing into this very
+        # call, whose own relink then finds the key already unlinked by the
+        # inner call and raises KeyError. Calling OrderedDict's __delitem__/
+        # __setitem__ directly (not overridden here) relinks it at the C
+        # level without that generic, reentrant fallback.
+        OrderedDict.__delitem__(self, key)
+        OrderedDict.__setitem__(self, key, value)
         return value
 
     def get(self, key: Hashable, default: Any = None) -> Any:

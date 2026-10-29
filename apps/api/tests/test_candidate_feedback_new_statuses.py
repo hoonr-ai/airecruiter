@@ -18,11 +18,19 @@ class _FakeCursor:
     def __init__(self, select_row=None):
         self.select_row = select_row
         self.executed_queries = []
+        self._last_query = ""
 
     def execute(self, query, params=None):
         self.executed_queries.append((query, params))
+        self._last_query = query
 
     def fetchone(self):
+        # The Reject-path row-lock UPDATE (PR #869 review: concurrency fix)
+        # returns a single `prev.data` column, not the multi-column row the
+        # initial candidate-resolution SELECT returns — mirror that shape so
+        # a test's fetchone() reflects whichever statement actually ran.
+        if "RETURNING prev.data" in self._last_query:
+            return (self.select_row[3],) if self.select_row else None
         return self.select_row
 
     def __enter__(self):

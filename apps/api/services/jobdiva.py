@@ -27,6 +27,7 @@ from core import (
     JOBDIVA_PAIR_RESUME_SOURCE_IDS_BY_CHANNEL,
     JOBDIVA_PAIR_RESUME_SOURCE_NAMES,
     DEFAULT_SCREENING_LEVEL,
+    JOBDIVA_READ_CACHE_TTL_S as _READ_CACHE_TTL_S,
 )
 from services.location_type import resolve_location_type
 from core import config as _core_config
@@ -47,11 +48,9 @@ _BI_WORKER_SEMAPHORE: Optional[asyncio.Semaphore] = None
 # a dashboard, a tracker and a metrics refresh asking for the same record
 # within seconds share one JobDiva call. Errors are never cached.
 # JOBDIVA_READ_CACHE_TTL_S=0 disables it. Small on purpose: these are full
-# JobDiva payloads, and worker memory is the thing being saved.
-try:
-    _READ_CACHE_TTL_S = float((os.getenv("JOBDIVA_READ_CACHE_TTL_S") or "").strip() or 30)
-except ValueError:
-    _READ_CACHE_TTL_S = 30.0
+# JobDiva payloads, and worker memory is the thing being saved. Parsed in
+# core/config.py (imported above as _READ_CACHE_TTL_S) for consistency with
+# every other env-backed setting.
 _read_cache = AsyncTTLCache(maxsize=200, ttl_s=_READ_CACHE_TTL_S)
 
 # Read-after-write across the 8 workers: every JobDiva write bumps a
@@ -82,7 +81,13 @@ async def _read_cache_token(kind: str, ident: Any) -> Any:
         return tuple(_local_read_gens.get(n, 0) for n in names)
     try:
         return tuple(await client.mget([_READ_GEN_PREFIX + n for n in names]))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — fail-open: a cache-token lookup must never block the real JobDiva call
+        # Same rate limit _mark_redis_down's own WARNING already uses (its
+        # _redis_down_until gate, checked before it flips) — logging this
+        # debug-level detail on every call during a sustained outage would
+        # otherwise spam right alongside it.
+        if time.monotonic() >= _bi_rate_limit._redis_down_until:
+            logger.debug("jobdiva read-cache token lookup failed (Redis): %s", exc)
         _bi_rate_limit._mark_redis_down(exc)
         return BYPASS
 
@@ -100,7 +105,9 @@ async def _bump_read_gens(names: List[str]) -> None:
             pipe.incr(_READ_GEN_PREFIX + n)
             pipe.expire(_READ_GEN_PREFIX + n, _READ_GEN_TTL_S)
         await pipe.execute()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — never raises: a failed bump must not fail the write
+        if time.monotonic() >= _bi_rate_limit._redis_down_until:
+            logger.debug("jobdiva read-cache generation bump failed (Redis): %s", exc)
         _bi_rate_limit._mark_redis_down(exc)
 
 
@@ -1524,6 +1531,37 @@ def normalize_employment_type(emp_type: str) -> str:
 _ALLOWED_RESUME_EXTENSIONS = {".pdf", ".doc", ".docx", ".rtf", ".txt"}
 _MAX_RESUME_ATTACHMENT_BYTES = 3 * 1024 * 1024  # ~Graph API attachment ceiling
 _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9 ._()\-]")
+
+
+def _content_matches_resume_extension(content: bytes, ext: str) -> bool:
+    """True if `content`'s own magic bytes are plausible for `ext`: the
+    extension alone comes from an externally-supplied filename, so a row
+    claiming e.g. .pdf whose content is something else entirely would
+    otherwise be attached to a recruiter email as-is, extension and content
+    mismatched.
+    """
+    head = content[:8]
+    if ext == ".pdf":
+        return head.startswith(b"%PDF-")
+    if ext == ".docx":
+        # DOCX (and any other OOXML/ZIP container) is a ZIP archive.
+        return head.startswith(b"PK\x03\x04")
+    if ext == ".doc":
+        # Legacy binary Word format is an OLE/CFBF compound file.
+        return head.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
+    if ext == ".rtf":
+        return head.startswith(b"{\\rtf")
+    if ext == ".txt":
+        # Plain text has no magic bytes of its own — reject anything that
+        # actually matches one of the binary signatures above (a mislabeled
+        # .txt) or contains a NUL byte (never valid in text).
+        return not (
+            b"\x00" in content[:4096]
+            or head.startswith(b"%PDF-")
+            or head.startswith(b"PK\x03\x04")
+            or head.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
+        )
+    return True
 
 
 def _sanitize_resume_filename(raw_filename: str, max_length: int = 150) -> str:
@@ -3888,6 +3926,13 @@ class JobDivaService:
                     content = base64.b64decode(b64_content, validate=True)
                 except (binascii.Error, ValueError) as decode_err:
                     logger.warning(f"ResumeDetail returned malformed base64 for {resume_id}: {decode_err}")
+                    return None
+
+                if not _content_matches_resume_extension(content, ext):
+                    logger.warning(
+                        f"ResumeDetail file for {resume_id} claims extension {ext!r} but its "
+                        "content's magic bytes don't match that format; falling back to generated doc"
+                    )
                     return None
 
                 if len(content) > _MAX_RESUME_ATTACHMENT_BYTES:
