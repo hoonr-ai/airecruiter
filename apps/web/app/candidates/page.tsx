@@ -25,6 +25,7 @@ import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { RejectionReasonSelect } from "@/components/RejectionReasonSelect";
 import { ChangeRejectionReasonButton } from "@/components/ChangeRejectionReasonButton";
+import { RejectChangeLimitNotice } from "@/components/RejectChangeLimitNotice";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import {
   Select,
@@ -263,6 +264,8 @@ interface Candidate {
   feedback_at?: string | null;
   feedback_by?: string | null;
   submission_type?: SubmissionKind | null;
+  /** How many times the rejection reason has been changed (max 2). */
+  reject_reason_change_count?: number;
   /** See submittalStatusFor. */
   submittal_status?: string;
   /** Earliest JobDiva submittal, calendar date YYYY-MM-DD (JobDiva's zone is unknown). */
@@ -608,6 +611,12 @@ export default function GlobalCandidatesPage() {
     feedback: FeedbackAction,
     reason: string | null,
     kind: SubmissionKind | null,
+    // The API's own post-save count (PR #876 review, medium) — without
+    // this, the "N remaining" button/banner reads stale until the next
+    // reload, and a recruiter could attempt (and get blocked on) a change
+    // the UI should have already disabled. undefined leaves the existing
+    // value untouched (non-Reject feedback types don't return one).
+    rejectReasonChangeCount?: number,
   ) => {
     const actor = (getActiveUserEmail() || "").trim().toLowerCase() || null;
     setCandidates(prev => prev.map(c => c.id !== candidateId ? c : {
@@ -618,6 +627,7 @@ export default function GlobalCandidatesPage() {
       feedback_by: actor,
       submission_type: kind,
       submittal_status: submittalStatusFor(kind, c.jobdiva_submittal_count),
+      ...(rejectReasonChangeCount !== undefined ? { reject_reason_change_count: rejectReasonChangeCount } : {}),
     }));
   };
 
@@ -666,11 +676,11 @@ export default function GlobalCandidatesPage() {
       try {
         const jobRef = jobRefFor(actionCandidateId);
         if (!jobRef) throw new Error("No job ID found");
-        await api.candidates.feedback(String(jobRef), String(actionCandidateId), {
+        const res = await api.candidates.feedback(String(jobRef), String(actionCandidateId), {
           feedback_type: 'Reject',
           reason: trimmedReason
         });
-        applyLocalFeedback(actionCandidateId, 'Reject', trimmedReason, null);
+        applyLocalFeedback(actionCandidateId, 'Reject', trimmedReason, null, res?.reject_reason_change_count);
       } catch (error) {
         console.error('Error syncing rejection:', error);
         const message = error instanceof ApiError
@@ -1489,6 +1499,7 @@ export default function GlobalCandidatesPage() {
                                 <ChangeRejectionReasonButton
                                   candidateName={c.name}
                                   disabled={syncingCandidateId === c.id}
+                                  changeCount={c.reject_reason_change_count ?? 0}
                                   onClick={() => {
                                     setActionCandidateId(c.id);
                                     setRejectReason(c.feedback_reason || "");
@@ -1598,6 +1609,12 @@ export default function GlobalCandidatesPage() {
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
                   </p>
+                  {(() => {
+                    const actionCand = candidates.find(c => c.id === actionCandidateId);
+                    const isChangingReason = actionCand?.feedback === 'Reject';
+                    if (!isChangingReason) return null;
+                    return <RejectChangeLimitNotice changeCount={actionCand?.reject_reason_change_count ?? 0} />;
+                  })()}
                   <div className="space-y-2">
                     <label htmlFor={`reject-reason-${actionCandidateId}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
                     <RejectionReasonSelect

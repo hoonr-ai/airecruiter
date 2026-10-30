@@ -72,6 +72,7 @@ import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 import { ChangeRejectionReasonButton } from "@/components/ChangeRejectionReasonButton";
+import { RejectChangeLimitNotice } from "@/components/RejectChangeLimitNotice";
 import { formatEasternDateTime, withEasternLabel } from "@/lib/date";
 import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 import { useActiveTime } from "@/hooks/use-active-time";
@@ -643,6 +644,18 @@ export default function CandidateRankingsPage() {
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
         setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: rejectedAt }));
+        // The API's own post-save count (PR #876 review, medium) — without
+        // this, the "N remaining" banner/button (which reads
+        // candidate.data.reject_reason_change_count) stays stale until the
+        // next reload, and a recruiter could attempt a change the UI should
+        // have already disabled.
+        if (res?.reject_reason_change_count !== undefined) {
+          const cid = String(actionCandidateId);
+          setCandidates(prev => prev.map(c => String(c.candidate_id || c.id) === cid
+            ? { ...c, data: { ...c.data, reject_reason_change_count: res.reject_reason_change_count } }
+            : c
+          ));
+        }
         if (res?.jobdiva_sync === 'error') {
           setToast({ message: `Rejection saved, but JobDiva sync failed: ${res?.jobdiva_message || "Unknown error"}`, type: "warning" });
         } else {
@@ -3258,6 +3271,7 @@ export default function CandidateRankingsPage() {
                                   <ChangeRejectionReasonButton
                                     candidateName={candidate.name}
                                     disabled={syncingCandidateId === candidate.id}
+                                    changeCount={candidate.data?.reject_reason_change_count ?? 0}
                                     onClick={() => {
                                       setActionCandidateId(candidate.id);
                                       setRejectReason(feedbackReasons[candidate.id] || "");
@@ -3428,6 +3442,12 @@ export default function CandidateRankingsPage() {
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
                   </p>
+                  {(() => {
+                    const actionCand = candidates.find(c => c.id === actionCandidateId);
+                    const isChangingReason = actionCand?.data?.feedback_type === 'Reject';
+                    if (!isChangingReason) return null;
+                    return <RejectChangeLimitNotice changeCount={actionCand?.data?.reject_reason_change_count ?? 0} />;
+                  })()}
                   <div className="space-y-2">
                     <label htmlFor={`reject-reason-${actionCandidateId || "rankings"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
                     <RejectionReasonSelect
