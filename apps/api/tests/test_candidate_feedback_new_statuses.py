@@ -70,6 +70,7 @@ class _FakeConnection:
         self.select_rows = select_rows
         self.committed = False
         self.closed = False
+        self.rolled_back = False
         # save_candidate_feedback opens several get_db_connection() calls
         # across the flow, each getting a fresh cursor — keep every one so
         # a test can inspect the UPDATE this handler issued after the fact.
@@ -82,6 +83,9 @@ class _FakeConnection:
 
     def commit(self):
         self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
 
     def close(self):
         self.closed = True

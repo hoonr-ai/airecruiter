@@ -650,7 +650,10 @@ export default function CandidateRankingsPage() {
         }
       } catch (error) {
         console.error('Error syncing rejection:', error);
-        setToast({ message: "Failed to save rejection reason", type: "error" });
+        const message = error instanceof ApiError
+          ? extractErrorMessage(error.data, "Failed to save rejection reason. Please try again.")
+          : "Failed to save rejection reason. Please try again.";
+        setToast({ message, type: "error" });
       } finally {
         setSyncingCandidateId(null);
         setIntegrationModalOpen(null);

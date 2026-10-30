@@ -131,6 +131,53 @@ def _comparable_updated_at(dt: Optional[datetime]) -> datetime:
     return dt
 
 
+def _is_genuine_reject_reason_change(prior_data: Dict[str, Any], new_reason: Optional[str]) -> bool:
+    """True only when `prior_data` (a sourced_candidates row's pre-write
+    `data`) describes an existing Reject with a DIFFERENT, non-empty reason
+    than `new_reason` — never for a first-ever rejection (no prior reason to
+    have changed from) and never for a same-reason retry/reconfirm. Shared by
+    save_candidate_feedback's MAX_REJECT_REASON_CHANGES check (which must run
+    — and be able to abort the write — before this request's own transaction
+    commits) and its is_rejection_reason_change (which decides the JobDiva
+    note's wording afterward); both read the same locked row snapshot, so
+    keeping this in one place means they can't silently drift apart (PR #874
+    review)."""
+    prior_reason = str(prior_data.get("feedback_reason") or "").strip()
+    new_reason_norm = str(new_reason or "").strip()
+    return (
+        str(prior_data.get("feedback_type") or "") == "Reject"
+        and bool(prior_reason)
+        and prior_reason != new_reason_norm
+    )
+
+
+def _safe_reject_reason_change_count(data: Dict[str, Any]) -> int:
+    """Defensive int parse of one row's reject_reason_change_count — a
+    single corrupt/non-numeric duplicate row must not crash the limit check
+    for every other row (or, worse, silently reset the whole count to 0 via
+    an un-caught max() over a generator)."""
+    try:
+        return int(data.get("reject_reason_change_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _reject_reason_limit_exceeded_error(conn) -> HTTPException:
+    """Rolls back and closes `conn` (undoing this request's own not-yet-committed
+    row-lock write) and returns the 422 to raise. Centralized so a future
+    change to this error path only has to happen in one place (PR #874 review)."""
+    conn.rollback()
+    conn.close()
+    return HTTPException(
+        status_code=422,
+        detail=(
+            f"This candidate's rejection reason has already been changed "
+            f"{MAX_REJECT_REASON_CHANGES} times and cannot be changed again. "
+            f"Contact an admin if this candidate genuinely needs another change."
+        ),
+    )
+
+
 from routers.hard_filter_utils import hard_filter_row_display as _hard_filter_row_display
 
 
@@ -5744,6 +5791,15 @@ REJECT_LOCK_UPDATE_BY_CANDIDATE_JOB_SQL = """UPDATE sourced_candidates
     WHERE sourced_candidates.id = prev.id
     RETURNING prev.id AS prev_id, prev.data AS prev_data, prev.updated_at AS prev_updated_at"""
 
+# A recruiter may change an already-recorded rejection reason (the "Change
+# reason" affordance) at most this many times. Past that, JobDiva's note
+# history for the candidate would otherwise accumulate an unbounded trail of
+# "reason was updated" notes. Counted in sourced_candidates.data as
+# reject_reason_change_count — incremented only on a genuine reason CHANGE
+# (is_rejection_reason_change below), never on a first rejection or a
+# same-reason retry.
+MAX_REJECT_REASON_CHANGES = 2
+
 
 @router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/feedback")
 async def save_candidate_feedback(
@@ -6122,6 +6178,14 @@ async def save_candidate_feedback(
             # for them, doesn't corrupt anything the UPDATE itself doesn't
             # already handle atomically.
             locked_prev_data: Optional[Dict[str, Any]] = None
+            # Every row this request's row-lock UPDATE matched (just the one,
+            # on this fast path) — raw, pre-normalization values as fetched.
+            # Distinct from locked_prev_data, which is deliberately only the
+            # single "current" row's data for the reason-change decision;
+            # this one feeds the MAX_REJECT_REASON_CHANGES check below, which
+            # (fallback path only) must not trust a single duplicate's count
+            # (PR #874 review).
+            _all_matched_reject_data_raw: List[Any] = []
             if sc_row_id is not None:
                 if request.feedback_type == "Reject":
                     _cur2.execute(
@@ -6130,6 +6194,7 @@ async def save_candidate_feedback(
                     )
                     row = _cur2.fetchone()
                     locked_prev_data = row[0] if row else None
+                    _all_matched_reject_data_raw = [row[0]] if row else []
                 else:
                     # Fast path: update exactly the row we resolved. updated_at
                     # is set explicitly (PR #851 review) — there is no trigger
@@ -6168,6 +6233,7 @@ async def save_candidate_feedback(
                     # to a Reject's "current" row).
                     rows = _cur2.fetchall()
                     locked_prev_data = None
+                    _all_matched_reject_data_raw = [r[1] for r in rows] if rows else []
                     if rows:
                         best = max(
                             rows,
@@ -6189,6 +6255,83 @@ async def save_candidate_feedback(
                 # isinstance guard mirrors step 1's own data_blob parsing
                 # above — same column, same driver, same possible shapes.
                 locked_prev_data = locked_prev_data if isinstance(locked_prev_data, dict) else _json_load_safe(locked_prev_data, {})
+                _all_matched_reject_data = [
+                    d if isinstance(d, dict) else _json_load_safe(d, {})
+                    for d in _all_matched_reject_data_raw
+                ]
+
+                # MAX_REJECT_REASON_CHANGES enforcement. Checked HERE — before
+                # this transaction commits — not down where
+                # is_rejection_reason_change is computed later in this
+                # function: the row-lock UPDATE above has already written
+                # this request's new reason into `data`, and that write is
+                # only made durable by this `try` block's own commit() at its
+                # end, so blocking here still means rolling back a write that
+                # hasn't landed yet. Blocking after commit would be too late
+                # — the "extra" change would already be on file either way.
+                if _is_genuine_reject_reason_change(locked_prev_data, request.reason):
+                    # Read as the MAX across every matched duplicate row, not
+                    # just locked_prev_data's single "current" row (PR #874
+                    # review): on the fallback path the patch below writes the
+                    # same incremented count to every matched row, so reading
+                    # the prior count from only one of them could under-count
+                    # (a stale duplicate reads lower, letting the limit be
+                    # bypassed) or over-count (a stale duplicate reads higher,
+                    # tripping the limit early) relative to what's actually on
+                    # file across the set.
+                    _prior_change_count = max(
+                        (_safe_reject_reason_change_count(d) for d in _all_matched_reject_data),
+                        default=0,
+                    )
+                    if _prior_change_count >= MAX_REJECT_REASON_CHANGES:
+                        raise _reject_reason_limit_exceeded_error(_conn2)
+                    # Patched into the same row(s) the row-lock UPDATE above
+                    # just touched, as its own small UPDATE in this same
+                    # transaction — the same "patch a derived field in with
+                    # its own small UPDATE" idiom the feedback_synced flag
+                    # below uses. Not folded into feedback_payload itself:
+                    # feedback_payload was built, and already handed to the
+                    # row-lock UPDATE above, before locked_prev_data — i.e.
+                    # the prior count — was known.
+                    #
+                    # No updated_at = now() here (PR #874 review, low): now()
+                    # is frozen to transaction-start in Postgres, so it would
+                    # write the exact same value the row-lock UPDATE above
+                    # already set, in the same transaction — a no-op that
+                    # would only make this write harder to tell apart from
+                    # the actual feedback write in a query log or test.
+                    #
+                    # Deliberately NOT conditioned on the later JobDiva sync
+                    # succeeding (PR #874 review, medium): sourced_candidates.data
+                    # is persisted locally regardless of downstream JobDiva
+                    # sync outcome (see step 3's own "Persisting locally
+                    # before triggering external side-effects" comment above)
+                    # — this count tracks local reason changes, consistent
+                    # with that, not confirmed-synced-to-JobDiva ones. A
+                    # failed-sync retry with the IDENTICAL reason does not
+                    # re-enter this branch at all (prior_reason == new_reason
+                    # by then, since the failed attempt's own write already
+                    # landed) — see test_retry_after_failed_sync_creates_note_
+                    # even_with_same_reason — so it can't double-count either.
+                    _count_payload = json.dumps({
+                        "reject_reason_change_count": _prior_change_count + 1,
+                    })
+                    if sc_row_id is not None:
+                        _cur2.execute(
+                            "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
+                            (_count_payload, sc_row_id)
+                        )
+                    else:
+                        _cur2.execute(
+                            """UPDATE sourced_candidates
+                                  SET data = data || %s::jsonb
+                                WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
+                                  AND (jobdiva_id = %s
+                                       OR jobdiva_id IN (
+                                             SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+                                       ))""",
+                            (_count_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
+                        )
             if request.feedback_type == "Callback Scheduled":
                 # Queued on this same cursor/transaction (see task_outbox's own
                 # docstring) so the reminder and the feedback write commit or
@@ -6224,6 +6367,11 @@ async def save_candidate_feedback(
                 )
             _conn2.commit()
         _conn2.close()
+    except HTTPException:
+        # Already a client-facing error (e.g. MAX_REJECT_REASON_CHANGES above,
+        # which has already rolled back and closed _conn2 itself) — let it
+        # propagate as-is instead of being masked as a generic 500 below.
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to persist feedback locally: {e}", exc_info=True)
         raise HTTPException(
@@ -6358,12 +6506,13 @@ async def save_candidate_feedback(
     # same-reason retry (that's a sync retry, not a change). Confirmed with
     # product (Somya): an updated rejection's JobDiva note must say in its
     # own text that the reason changed, not just read like a second,
-    # unrelated first-time rejection.
+    # unrelated first-time rejection. Shared with the MAX_REJECT_REASON_CHANGES
+    # check above (same condition, same _reject_prior/locked_prev_data
+    # snapshot) via _is_genuine_reject_reason_change, so the two can't drift
+    # apart (PR #874 review).
     is_rejection_reason_change = (
         request.feedback_type == "Reject"
-        and str(_reject_prior.get("feedback_type") or "") == "Reject"
-        and bool(prior_reject_reason)
-        and prior_reject_reason != new_reject_reason
+        and _is_genuine_reject_reason_change(_reject_prior, request.reason)
     )
 
     if request.feedback_type in ("Unreachable", "Allotment Slot Filled", "Callback Scheduled"):
