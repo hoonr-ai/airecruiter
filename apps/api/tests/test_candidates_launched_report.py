@@ -75,6 +75,7 @@ def test_feedback_fields_only_report_actor_and_time_with_a_current_decision():
         "feedback_at": None,
         "feedback_by": None,
         "submission_type": None,
+        "reject_reason_change_count": 0,
     }
     rejected = {
         "feedback_type": "Reject",
@@ -89,6 +90,7 @@ def test_feedback_fields_only_report_actor_and_time_with_a_current_decision():
         "feedback_at": "2026-09-21T13:46:55+00:00",
         "feedback_by": "rec@x.com",
         "submission_type": None,
+        "reject_reason_change_count": 0,
     }
     submitted = {"feedback_type": "Submit", "feedback_reason": None, "submission_type": "internal"}
     fields = cr._launched_feedback_fields(submitted)
@@ -96,6 +98,25 @@ def test_feedback_fields_only_report_actor_and_time_with_a_current_decision():
     assert fields["feedback_reason"] is None
     assert fields["submission_type"] == "internal"
     assert cr._launched_feedback_fields(None)["feedback"] is None
+
+
+def test_feedback_fields_reports_reject_reason_change_count_only_for_reject_rows():
+    """PR #876 review: reject_reason_change_count must be returned for
+    Reject rows (reading the real saved count) and must be 0 for every
+    other feedback type, even if the key happens to be present in the blob
+    (e.g. a stale value left over from before the candidate's latest
+    decision was something other than Reject)."""
+    assert cr._launched_feedback_fields(
+        {"feedback_type": "Reject", "reject_reason_change_count": 2}
+    )["reject_reason_change_count"] == 2
+    assert cr._launched_feedback_fields(
+        {"feedback_type": "Reject"}
+    )["reject_reason_change_count"] == 0
+    assert cr._launched_feedback_fields(
+        {"feedback_type": "Submit", "reject_reason_change_count": 2}
+    )["reject_reason_change_count"] == 0
+    assert cr._launched_feedback_fields({})["reject_reason_change_count"] == 0
+    assert cr._launched_feedback_fields(None)["reject_reason_change_count"] == 0
 
 
 @pytest.mark.parametrize(

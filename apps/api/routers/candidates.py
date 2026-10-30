@@ -6180,6 +6180,7 @@ async def save_candidate_feedback(
             # for them, doesn't corrupt anything the UPDATE itself doesn't
             # already handle atomically.
             locked_prev_data: Optional[Dict[str, Any]] = None
+            _reject_reason_change_count_committed: Optional[int] = None
             # Every row this request's row-lock UPDATE matched (just the one,
             # on this fast path) — raw, pre-normalization values as fetched.
             # Distinct from locked_prev_data, which is deliberately only the
@@ -6318,6 +6319,7 @@ async def save_candidate_feedback(
                     _count_payload = json.dumps({
                         "reject_reason_change_count": _prior_change_count + 1,
                     })
+                    _reject_reason_change_count_committed = _prior_change_count + 1
                     if sc_row_id is not None:
                         _cur2.execute(
                             "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
@@ -6517,6 +6519,21 @@ async def save_candidate_feedback(
         and _is_genuine_reject_reason_change(_reject_prior, request.reason)
     )
 
+    # reject_reason_change_count AFTER this save, for every Reject outcome —
+    # a first rejection, a same-reason reconfirm, or a genuine change — not
+    # just a genuine change. Returned to the frontend so it can patch its
+    # local candidate state immediately; without this the "N remaining"
+    # button/banner reads stale until the next reload, and a recruiter could
+    # attempt (and get blocked on) a change the UI should have already
+    # disabled (PR #876 review, medium).
+    reject_reason_change_count_after_save: Optional[int] = None
+    if request.feedback_type == "Reject":
+        reject_reason_change_count_after_save = (
+            _reject_reason_change_count_committed
+            if _reject_reason_change_count_committed is not None
+            else _safe_reject_reason_change_count(_reject_prior)
+        )
+
     if request.feedback_type in ("Unreachable", "Allotment Slot Filled", "Callback Scheduled"):
         logger.info("ℹ️ Skipping JobDiva note for '%s' status.", request.feedback_type)
         jobdiva_result = {"status": "success"}
@@ -6635,6 +6652,7 @@ async def save_candidate_feedback(
         "jobdiva_job_ref": jd_job_ref,
         "feedback_completed": (feedback_metrics or {}).get("feedback_completed"),
         "pair_submits": (feedback_metrics or {}).get("pair_submits"),
+        "reject_reason_change_count": reject_reason_change_count_after_save,
     }
 
 

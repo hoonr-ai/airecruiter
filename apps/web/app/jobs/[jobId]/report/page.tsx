@@ -3,6 +3,8 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { RejectionReasonSelect } from "@/components/RejectionReasonSelect";
+import { RejectChangeLimitNotice } from "@/components/RejectChangeLimitNotice";
+import { getRemainingRejectChanges } from "@/lib/rejection-limit";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
@@ -290,7 +292,14 @@ export default function CandidateEvaluationReportPage() {
                 ...prev.candidate,
                 feedback_type: 'Reject',
                 feedback_reason: trimmedReason,
-                feedback_at: new Date().toISOString()
+                feedback_at: new Date().toISOString(),
+                // The API's own post-save count (PR #876 review, medium) —
+                // without this, the "N remaining" button/banner stays stale
+                // until the next reload. undefined leaves the prior value
+                // untouched rather than clobbering it with undefined.
+                ...(resJson?.reject_reason_change_count !== undefined
+                  ? { reject_reason_change_count: resJson.reject_reason_change_count }
+                  : {}),
               }
             };
           });
@@ -467,16 +476,21 @@ export default function CandidateEvaluationReportPage() {
                   <Ban className="w-4 h-4" /> Rejected
                 </div>
                 {!sharedVia && (() => {
-                  const changeCount = Number(candidate?.reject_reason_change_count ?? 0);
-                  const maxChanges = 2;
-                  const remaining = Math.max(0, maxChanges - changeCount);
-                  const limitReached = remaining === 0;
+                  const { changeCount, remaining, limitReached, maxChanges } = getRemainingRejectChanges(
+                    candidate?.reject_reason_change_count
+                  );
 
                   return (
                     <div className="flex items-center gap-2">
                       <button
                         disabled={limitReached}
                         onClick={() => {
+                          // Reopen the same reject modal, prefilled with the
+                          // already-recorded reason, so a recruiter can change
+                          // it — this used to be impossible, since the whole
+                          // Submit/Reject button row disappeared behind this
+                          // static "Rejected" badge once a rejection was
+                          // recorded.
                           setRejectReason(String(candidate.feedback_reason || ""));
                           setIntegrationModalOpen('reject');
                         }}
@@ -487,14 +501,20 @@ export default function CandidateEvaluationReportPage() {
                         }`}
                         title={
                           limitReached
-                            ? "Rejection reason change limit reached (2/2)"
+                            ? `Rejection reason change limit reached (${changeCount}/${maxChanges})`
                             : `Change reason (${remaining}/${maxChanges} attempts remaining)`
+                        }
+                        aria-label={
+                          limitReached
+                            ? `Reason locked (${changeCount} of ${maxChanges} changes used)`
+                            : `Change rejection reason (${changeCount} of ${maxChanges} changes used)`
                         }
                       >
                         <Ban className="w-4 h-4" />
                         {limitReached ? "Reason Locked" : "Change Rejection Reason"}
                       </button>
                       <span
+                        aria-hidden="true"
                         className={`text-xs font-semibold tabular-nums ${
                           limitReached ? "text-rose-500" : "text-slate-400"
                         }`}
@@ -984,28 +1004,9 @@ export default function CandidateEvaluationReportPage() {
                 </div>
                 <div className="p-6 space-y-4">
                   <p className="text-sm text-slate-500">
-                    Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidate?.name || "Winci Zu"}</strong>.
+                    Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidate?.name || "this candidate"}</strong>.
                   </p>
-                  {(() => {
-                    const isChangingReason = isRejected;
-                    if (!isChangingReason) return null;
-                    const changeCount = Number(candidate?.reject_reason_change_count ?? 0);
-                    const MAX_CHANGES = 2;
-                    const remaining = Math.max(0, MAX_CHANGES - changeCount);
-                    return (
-                      <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${remaining === 0 ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
-                        <span className="font-semibold">
-                          {remaining === 0
-                            ? "Change limit reached"
-                            : `${remaining} change${remaining === 1 ? "" : "s"} remaining`}
-                        </span>
-                        <span className="text-[10px] opacity-75">({changeCount}/{MAX_CHANGES} used)</span>
-                        {remaining === 0 && (
-                          <span className="ml-1">Contact an admin for further changes.</span>
-                        )}
-                      </div>
-                    );
-                  })()}
+                  {isRejected && <RejectChangeLimitNotice changeCount={candidate?.reject_reason_change_count ?? 0} />}
                   <div className="space-y-2">
                     <label htmlFor={`reject-reason-${candidate?.name || "report"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
                     <RejectionReasonSelect

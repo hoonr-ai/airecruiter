@@ -592,3 +592,64 @@ async def test_fallback_path_also_enforces_the_limit(monkeypatch):
     assert exc_info.value.status_code == 422
     assert len(jobdiva_calls) == 0
     assert fake_conn.rolled_back is True
+
+
+# --- response reject_reason_change_count (PR #876 review) ------------------
+# Without this, the frontend's "N remaining" button/banner reads stale until
+# the next reload — it needs the count AFTER this save, not just whatever it
+# fetched before the recruiter opened the modal.
+
+@pytest.mark.anyio
+async def test_response_reports_zero_on_a_first_ever_rejection(monkeypatch):
+    cand_module, _jobdiva_calls, _fake_conn = _base_setup(monkeypatch)
+
+    res = await _reject(cand_module, "Skills do not meet requirements")
+
+    assert res["reject_reason_change_count"] == 0
+
+
+@pytest.mark.anyio
+async def test_response_reports_one_after_the_first_change(monkeypatch):
+    cand_module, _jobdiva_calls, _fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_ALREADY_REJECTED,
+    )
+
+    res = await _reject(cand_module, "Communication skills")
+
+    assert res["reject_reason_change_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_response_reports_two_after_the_second_change(monkeypatch):
+    cand_module, _jobdiva_calls, _fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_ONE_CHANGE_ALREADY,
+    )
+
+    res = await _reject(cand_module, "Domain experience mismatch")
+
+    assert res["reject_reason_change_count"] == 2
+
+
+@pytest.mark.anyio
+async def test_response_reports_the_unchanged_count_on_a_same_reason_reconfirm(monkeypatch):
+    cand_module, _jobdiva_calls, _fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_ONE_CHANGE_ALREADY,
+    )
+
+    res = await _reject(cand_module, "Communication skills")
+
+    assert res["reject_reason_change_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_response_omits_the_count_for_non_reject_feedback(monkeypatch):
+    cand_module, _jobdiva_calls, _fake_conn = _base_setup(monkeypatch)
+    user = UserIdentity(email="recruiter@pyramidci.com", role="recruiter")
+    request = CandidateFeedbackRequest(feedback_type="Unreachable")
+
+    res = await cand_module.save_candidate_feedback(
+        job_id_or_ref="26-12137", candidate_id="55148489",
+        request=request, background_tasks=BackgroundTasks(), user=user,
+    )
+
+    assert res["reject_reason_change_count"] is None

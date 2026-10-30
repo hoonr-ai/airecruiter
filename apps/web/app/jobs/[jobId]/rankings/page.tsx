@@ -72,6 +72,7 @@ import { useClampedScoreInput } from "@/hooks/use-clamped-score";
 import { cn } from "@/lib/utils";
 import { SubmissionModal, type SubmissionPayload } from "@/components/SubmissionModal";
 import { ChangeRejectionReasonButton } from "@/components/ChangeRejectionReasonButton";
+import { RejectChangeLimitNotice } from "@/components/RejectChangeLimitNotice";
 import { formatEasternDateTime, withEasternLabel } from "@/lib/date";
 import { getCandidateCompletedAt } from "@/lib/candidate-completed-at";
 import { useActiveTime } from "@/hooks/use-active-time";
@@ -643,6 +644,18 @@ export default function CandidateRankingsPage() {
         setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
         setFeedbackReasons(prev => ({ ...prev, [actionCandidateId]: trimmedReason }));
         setFeedbackTimes(prev => ({ ...prev, [actionCandidateId]: rejectedAt }));
+        // The API's own post-save count (PR #876 review, medium) — without
+        // this, the "N remaining" banner/button (which reads
+        // candidate.data.reject_reason_change_count) stays stale until the
+        // next reload, and a recruiter could attempt a change the UI should
+        // have already disabled.
+        if (res?.reject_reason_change_count !== undefined) {
+          const cid = String(actionCandidateId);
+          setCandidates(prev => prev.map(c => String(c.candidate_id || c.id) === cid
+            ? { ...c, data: { ...c.data, reject_reason_change_count: res.reject_reason_change_count } }
+            : c
+          ));
+        }
         if (res?.jobdiva_sync === 'error') {
           setToast({ message: `Rejection saved, but JobDiva sync failed: ${res?.jobdiva_message || "Unknown error"}`, type: "warning" });
         } else {
@@ -3431,24 +3444,9 @@ export default function CandidateRankingsPage() {
                   </p>
                   {(() => {
                     const actionCand = candidates.find(c => c.id === actionCandidateId);
-                    const changeCount = actionCand?.data?.reject_reason_change_count ?? 0;
                     const isChangingReason = actionCand?.data?.feedback_type === 'Reject';
-                    const MAX_CHANGES = 2;
-                    const remaining = Math.max(0, MAX_CHANGES - changeCount);
                     if (!isChangingReason) return null;
-                    return (
-                      <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${remaining === 0 ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
-                        <span className="font-semibold">
-                          {remaining === 0
-                            ? "Change limit reached"
-                            : `${remaining} change${remaining === 1 ? "" : "s"} remaining`}
-                        </span>
-                        <span className="text-[10px] opacity-75">({changeCount}/{MAX_CHANGES} used)</span>
-                        {remaining === 0 && (
-                          <span className="ml-1">Contact an admin for further changes.</span>
-                        )}
-                      </div>
-                    );
+                    return <RejectChangeLimitNotice changeCount={actionCand?.data?.reject_reason_change_count ?? 0} />;
                   })()}
                   <div className="space-y-2">
                     <label htmlFor={`reject-reason-${actionCandidateId || "rankings"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>

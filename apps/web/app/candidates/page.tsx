@@ -25,6 +25,7 @@ import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { RejectionReasonSelect } from "@/components/RejectionReasonSelect";
 import { ChangeRejectionReasonButton } from "@/components/ChangeRejectionReasonButton";
+import { RejectChangeLimitNotice } from "@/components/RejectChangeLimitNotice";
 import { NeedsReviewBadge } from "@/components/NeedsReviewBadge";
 import {
   Select,
@@ -610,6 +611,12 @@ export default function GlobalCandidatesPage() {
     feedback: FeedbackAction,
     reason: string | null,
     kind: SubmissionKind | null,
+    // The API's own post-save count (PR #876 review, medium) — without
+    // this, the "N remaining" button/banner reads stale until the next
+    // reload, and a recruiter could attempt (and get blocked on) a change
+    // the UI should have already disabled. undefined leaves the existing
+    // value untouched (non-Reject feedback types don't return one).
+    rejectReasonChangeCount?: number,
   ) => {
     const actor = (getActiveUserEmail() || "").trim().toLowerCase() || null;
     setCandidates(prev => prev.map(c => c.id !== candidateId ? c : {
@@ -620,6 +627,7 @@ export default function GlobalCandidatesPage() {
       feedback_by: actor,
       submission_type: kind,
       submittal_status: submittalStatusFor(kind, c.jobdiva_submittal_count),
+      ...(rejectReasonChangeCount !== undefined ? { reject_reason_change_count: rejectReasonChangeCount } : {}),
     }));
   };
 
@@ -668,11 +676,11 @@ export default function GlobalCandidatesPage() {
       try {
         const jobRef = jobRefFor(actionCandidateId);
         if (!jobRef) throw new Error("No job ID found");
-        await api.candidates.feedback(String(jobRef), String(actionCandidateId), {
+        const res = await api.candidates.feedback(String(jobRef), String(actionCandidateId), {
           feedback_type: 'Reject',
           reason: trimmedReason
         });
-        applyLocalFeedback(actionCandidateId, 'Reject', trimmedReason, null);
+        applyLocalFeedback(actionCandidateId, 'Reject', trimmedReason, null, res?.reject_reason_change_count);
       } catch (error) {
         console.error('Error syncing rejection:', error);
         const message = error instanceof ApiError
@@ -1603,24 +1611,9 @@ export default function GlobalCandidatesPage() {
                   </p>
                   {(() => {
                     const actionCand = candidates.find(c => c.id === actionCandidateId);
-                    const changeCount = actionCand?.reject_reason_change_count ?? 0;
                     const isChangingReason = actionCand?.feedback === 'Reject';
-                    const MAX_CHANGES = 2;
-                    const remaining = Math.max(0, MAX_CHANGES - changeCount);
                     if (!isChangingReason) return null;
-                    return (
-                      <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${remaining === 0 ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
-                        <span className="font-semibold">
-                          {remaining === 0
-                            ? "Change limit reached"
-                            : `${remaining} change${remaining === 1 ? "" : "s"} remaining`}
-                        </span>
-                        <span className="text-[10px] opacity-75">({changeCount}/{MAX_CHANGES} used)</span>
-                        {remaining === 0 && (
-                          <span className="ml-1">Contact an admin for further changes.</span>
-                        )}
-                      </div>
-                    );
+                    return <RejectChangeLimitNotice changeCount={actionCand?.reject_reason_change_count ?? 0} />;
                   })()}
                   <div className="space-y-2">
                     <label htmlFor={`reject-reason-${actionCandidateId}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
