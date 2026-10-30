@@ -13,14 +13,15 @@ re-confirmed unchanged. See also test_rejection_reasons_sync.py (the
 reason->JobDiva-action mapping itself) and queue_tasks.CREATE_JOBDIVA_PASS_NOTE
 (the unrelated, still-pinned "Pass" note flow this must not touch).
 """
+import json
 from datetime import datetime, timezone
 
 import pytest
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, HTTPException
 
 from core.auth import UserIdentity
 from models import CandidateFeedbackRequest
-from routers.candidates import _comparable_updated_at
+from routers.candidates import MAX_REJECT_REASON_CHANGES, _comparable_updated_at
 
 from tests.test_candidate_feedback_new_statuses import _base_setup
 
@@ -100,6 +101,29 @@ _FAKE_ROW_DUP_NAIVE_NEWER = (
     {"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements", "feedback_synced": True},
     "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
     datetime(2026, 1, 1),
+)
+
+# Already rejected, and the reason has already been changed once —
+# reject_reason_change_count carries that history forward. A SECOND change
+# (still under MAX_REJECT_REASON_CHANGES=2) must be allowed.
+_FAKE_CAND_ROW_ONE_CHANGE_ALREADY = (
+    55148489, "21562841721070", "26-12137",
+    {
+        "feedback_type": "Reject", "feedback_reason": "Communication skills",
+        "feedback_synced": True, "reject_reason_change_count": 1,
+    },
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+)
+
+# Already changed twice — at MAX_REJECT_REASON_CHANGES. A THIRD change must
+# be blocked.
+_FAKE_CAND_ROW_TWO_CHANGES_ALREADY = (
+    55148489, "21562841721070", "26-12137",
+    {
+        "feedback_type": "Reject", "feedback_reason": "Communication skills",
+        "feedback_synced": True, "reject_reason_change_count": 2,
+    },
+    "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
 )
 
 
@@ -415,3 +439,114 @@ async def test_fallback_lock_does_not_crash_with_a_mix_of_aware_and_naive_duplic
 
     assert res["status"] == "success"
     assert len(jobdiva_calls) == 0  # naive-newer row's reason matches -> unchanged
+
+
+# --- MAX_REJECT_REASON_CHANGES ---------------------------------------------
+
+
+def _count_patch_payloads(fake_conn):
+    """json.loads of every UPDATE's `reject_reason_change_count` patch
+    payload issued across every cursor this request opened, in call order."""
+    payloads = []
+    for cur in fake_conn.cursors:
+        for query, params in cur.executed_queries:
+            if "UPDATE sourced_candidates" in query and params and "reject_reason_change_count" in str(params[0]):
+                payloads.append(json.loads(params[0]))
+    return payloads
+
+
+@pytest.mark.anyio
+async def test_first_change_is_allowed_and_recorded_as_one(monkeypatch):
+    """A first-ever reason CHANGE (not a first rejection) must be allowed and
+    must patch reject_reason_change_count to 1."""
+    cand_module, jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_ALREADY_REJECTED,
+    )
+
+    res = await _reject(cand_module, "Communication skills")
+
+    assert res["status"] == "success"
+    assert len(jobdiva_calls) == 1
+    payloads = _count_patch_payloads(fake_conn)
+    assert payloads == [{"reject_reason_change_count": 1}]
+
+
+@pytest.mark.anyio
+async def test_second_change_is_allowed_and_recorded_as_two(monkeypatch):
+    """Still under MAX_REJECT_REASON_CHANGES (2) — allowed, and the count
+    advances from 1 to 2."""
+    assert MAX_REJECT_REASON_CHANGES == 2
+    cand_module, jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_ONE_CHANGE_ALREADY,
+    )
+
+    res = await _reject(cand_module, "Domain experience mismatch")
+
+    assert res["status"] == "success"
+    assert len(jobdiva_calls) == 1
+    payloads = _count_patch_payloads(fake_conn)
+    assert payloads == [{"reject_reason_change_count": 2}]
+
+
+@pytest.mark.anyio
+async def test_third_change_is_blocked_with_422(monkeypatch):
+    """At MAX_REJECT_REASON_CHANGES already — a third distinct reason must be
+    rejected outright: no JobDiva note, no commit, and the already-executed
+    row-lock UPDATE must be rolled back rather than left to commit."""
+    cand_module, jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_TWO_CHANGES_ALREADY,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _reject(cand_module, "Overqualified for the role")
+
+    assert exc_info.value.status_code == 422
+    assert str(MAX_REJECT_REASON_CHANGES) in exc_info.value.detail
+    assert len(jobdiva_calls) == 0
+    assert fake_conn.rolled_back is True
+    assert fake_conn.committed is False
+    # No count-patch UPDATE either — the request was blocked before that point.
+    assert _count_patch_payloads(fake_conn) == []
+
+
+@pytest.mark.anyio
+async def test_reconfirming_same_reason_at_the_limit_is_still_allowed(monkeypatch):
+    """Re-confirming the SAME reason that's already on file is not a
+    "change" at all (reject_reason_unchanged, not is_rejection_reason_change)
+    — must succeed even when reject_reason_change_count is already at the
+    limit, and must not advance the count further."""
+    cand_module, jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=_FAKE_CAND_ROW_TWO_CHANGES_ALREADY,
+    )
+
+    res = await _reject(cand_module, "Communication skills")
+
+    assert res["status"] == "success"
+    assert len(jobdiva_calls) == 0
+    assert _count_patch_payloads(fake_conn) == []
+
+
+@pytest.mark.anyio
+async def test_fallback_path_also_enforces_the_limit(monkeypatch):
+    """The candidate_id/jobdiva_id fallback (no sourced_row_id pin) must
+    enforce the same limit, reading the count off the most-recently-updated
+    duplicate row — same row `_reject_prior` itself is read from."""
+    _fake_row_dup_two_changes = (
+        1, "21562841721070", "26-12137",
+        {
+            "feedback_type": "Reject", "feedback_reason": "Communication skills",
+            "feedback_synced": True, "reject_reason_change_count": 2,
+        },
+        "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+        datetime(2026, 1, 1),
+    )
+    cand_module, jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=None, select_rows=[_fake_row_dup_two_changes],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _reject(cand_module, "Overqualified for the role")
+
+    assert exc_info.value.status_code == 422
+    assert len(jobdiva_calls) == 0
+    assert fake_conn.rolled_back is True

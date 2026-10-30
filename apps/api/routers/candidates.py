@@ -5744,6 +5744,15 @@ REJECT_LOCK_UPDATE_BY_CANDIDATE_JOB_SQL = """UPDATE sourced_candidates
     WHERE sourced_candidates.id = prev.id
     RETURNING prev.id AS prev_id, prev.data AS prev_data, prev.updated_at AS prev_updated_at"""
 
+# A recruiter may change an already-recorded rejection reason (the "Change
+# reason" affordance) at most this many times. Past that, JobDiva's note
+# history for the candidate would otherwise accumulate an unbounded trail of
+# "reason was updated" notes. Counted in sourced_candidates.data as
+# reject_reason_change_count — incremented only on a genuine reason CHANGE
+# (is_rejection_reason_change below), never on a first rejection or a
+# same-reason retry.
+MAX_REJECT_REASON_CHANGES = 2
+
 
 @router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/feedback")
 async def save_candidate_feedback(
@@ -6189,6 +6198,69 @@ async def save_candidate_feedback(
                 # isinstance guard mirrors step 1's own data_blob parsing
                 # above — same column, same driver, same possible shapes.
                 locked_prev_data = locked_prev_data if isinstance(locked_prev_data, dict) else _json_load_safe(locked_prev_data, {})
+
+                # MAX_REJECT_REASON_CHANGES enforcement. Checked HERE — before
+                # this transaction commits — not down where
+                # is_rejection_reason_change is computed later in this
+                # function: the row-lock UPDATE above has already written
+                # this request's new reason into `data`, and that write is
+                # only made durable by this `try` block's own commit() at its
+                # end, so blocking here still means rolling back a write that
+                # hasn't landed yet. Blocking after commit would be too late
+                # — the "extra" change would already be on file either way.
+                # A deliberate, self-contained mirror of
+                # is_rejection_reason_change's own condition (not a shared
+                # call) — that computation reads locked_prev_data too, but
+                # this one has to run, and be able to abort the transaction,
+                # before any of the code between here and there (step 3.5's
+                # notifications, step 4's JobDiva note) ever runs.
+                _prior_reason_for_limit = str(locked_prev_data.get("feedback_reason") or "").strip()
+                _new_reason_for_limit = str(request.reason or "").strip()
+                _is_change_for_limit = (
+                    str(locked_prev_data.get("feedback_type") or "") == "Reject"
+                    and bool(_prior_reason_for_limit)
+                    and _prior_reason_for_limit != _new_reason_for_limit
+                )
+                if _is_change_for_limit:
+                    try:
+                        _prior_change_count = int(locked_prev_data.get("reject_reason_change_count") or 0)
+                    except (TypeError, ValueError):
+                        _prior_change_count = 0
+                    if _prior_change_count >= MAX_REJECT_REASON_CHANGES:
+                        _conn2.rollback()
+                        _conn2.close()
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"This candidate's rejection reason has already been changed "
+                                f"{MAX_REJECT_REASON_CHANGES} times and cannot be changed again."
+                            ),
+                        )
+                    # Patched into the same row(s) the row-lock UPDATE above
+                    # just touched, as its own small UPDATE in this same
+                    # transaction — the same "patch a derived field in with
+                    # its own small UPDATE" idiom the feedback_synced flag
+                    # below uses. Not folded into feedback_payload itself:
+                    # feedback_payload was built, and already handed to the
+                    # row-lock UPDATE above, before locked_prev_data — i.e.
+                    # the prior count — was known.
+                    _count_payload = json.dumps({"reject_reason_change_count": _prior_change_count + 1})
+                    if sc_row_id is not None:
+                        _cur2.execute(
+                            "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
+                            (_count_payload, sc_row_id)
+                        )
+                    else:
+                        _cur2.execute(
+                            """UPDATE sourced_candidates
+                                  SET data = data || %s::jsonb
+                                WHERE (candidate_id = %s OR (%s::bigint IS NOT NULL AND id = %s))
+                                  AND (jobdiva_id = %s
+                                       OR jobdiva_id IN (
+                                             SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s
+                                       ))""",
+                            (_count_payload, cand_id_str, pk_val, pk_val, job_id_or_ref, job_id_or_ref, job_id_or_ref)
+                        )
             if request.feedback_type == "Callback Scheduled":
                 # Queued on this same cursor/transaction (see task_outbox's own
                 # docstring) so the reminder and the feedback write commit or
@@ -6224,6 +6296,11 @@ async def save_candidate_feedback(
                 )
             _conn2.commit()
         _conn2.close()
+    except HTTPException:
+        # Already a client-facing error (e.g. MAX_REJECT_REASON_CHANGES above,
+        # which has already rolled back and closed _conn2 itself) — let it
+        # propagate as-is instead of being masked as a generic 500 below.
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to persist feedback locally: {e}", exc_info=True)
         raise HTTPException(

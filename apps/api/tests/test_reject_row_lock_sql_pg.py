@@ -43,12 +43,12 @@ import pytest
 
 psycopg2 = pytest.importorskip("psycopg2")
 
-from fastapi import BackgroundTasks  # noqa: E402
+from fastapi import BackgroundTasks, HTTPException  # noqa: E402
 
 from core.auth import UserIdentity  # noqa: E402
 from models import CandidateFeedbackRequest  # noqa: E402
 from routers import candidates as cand_module  # noqa: E402
-from routers.candidates import REJECT_LOCK_UPDATE_BY_CANDIDATE_JOB_SQL  # noqa: E402
+from routers.candidates import MAX_REJECT_REASON_CHANGES, REJECT_LOCK_UPDATE_BY_CANDIDATE_JOB_SQL  # noqa: E402
 
 _DSN = os.getenv("LAUNCH_PLATFORM_TEST_DSN") or os.getenv("LAUNCH_REPORT_TEST_DSN", "dbname=postgres")
 
@@ -80,6 +80,9 @@ class _Shared:
 
     def commit(self):
         self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
 
     def close(self):
         pass
@@ -203,6 +206,37 @@ async def test_changing_an_already_rejected_reason_does_not_error(pg):
 
     assert res["status"] == "success"
     assert _read_data(pg, row_id)["feedback_reason"] == "Communication skills"
+
+
+@pytest.mark.anyio
+async def test_rejection_reason_change_is_blocked_after_the_limit(pg):
+    """MAX_REJECT_REASON_CHANGES end to end against real Postgres: the first
+    two changes succeed and advance reject_reason_change_count; a third
+    distinct change is blocked with a 422, and the row is left exactly as the
+    second (successful) change wrote it — the blocked attempt's own row-lock
+    UPDATE must be rolled back, not just skipped further down the line."""
+    row_id = _insert_row(
+        pg,
+        data='{"feedback_type": "Reject", "feedback_reason": "Skills do not meet requirements", "feedback_synced": true}',
+    )
+    user = UserIdentity(email=_RECRUITER, role="recruiter")
+
+    res1 = await _reject(user, "C1", "Communication skills", sourced_row_id=row_id)
+    assert res1["status"] == "success"
+    assert _read_data(pg, row_id)["reject_reason_change_count"] == 1
+
+    res2 = await _reject(user, "C1", "Domain experience mismatch", sourced_row_id=row_id)
+    assert res2["status"] == "success"
+    assert _read_data(pg, row_id)["reject_reason_change_count"] == 2
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _reject(user, "C1", "Overqualified for the role", sourced_row_id=row_id)
+    assert exc_info.value.status_code == 422
+    assert str(MAX_REJECT_REASON_CHANGES) in exc_info.value.detail
+
+    final_data = _read_data(pg, row_id)
+    assert final_data["feedback_reason"] == "Domain experience mismatch"
+    assert final_data["reject_reason_change_count"] == 2
 
 
 def test_fallback_lock_sql_directly_against_two_duplicate_rows(pg):

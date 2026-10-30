@@ -673,6 +673,10 @@ export default function GlobalCandidatesPage() {
         applyLocalFeedback(actionCandidateId, 'Reject', trimmedReason, null);
       } catch (error) {
         console.error('Error syncing rejection:', error);
+        const message = error instanceof ApiError
+          ? extractErrorMessage(error.data, "Failed to save rejection reason. Please try again.")
+          : "Failed to save rejection reason. Please try again.";
+        setToast({ message, type: "error" });
       } finally {
         setSyncingCandidateId(null);
         setIntegrationModalOpen(null);
