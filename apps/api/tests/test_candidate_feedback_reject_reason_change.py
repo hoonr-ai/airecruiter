@@ -527,6 +527,48 @@ async def test_reconfirming_same_reason_at_the_limit_is_still_allowed(monkeypatc
 
 
 @pytest.mark.anyio
+async def test_fallback_path_reads_the_limit_from_the_highest_duplicate_count(monkeypatch):
+    """PR #874 review (medium): the fallback path's count-patch below always
+    writes the SAME incremented value to every matched duplicate row, so the
+    prior count must be read as the MAX across all of them — not just the
+    single most-recently-updated "current" row locked_prev_data uses for the
+    reason-change decision. A stale duplicate sitting on a LOWER count than
+    the current row must not let the limit be bypassed."""
+    _fake_row_dup_current_low_count = (
+        1, "21562841721070", "26-12137",
+        {
+            "feedback_type": "Reject", "feedback_reason": "Communication skills",
+            "feedback_synced": True, "reject_reason_change_count": 0,
+        },
+        "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+        datetime(2026, 1, 1),
+    )
+    _fake_row_dup_stale_high_count = (
+        99999999, "21562841721070", "26-12137",
+        {
+            "feedback_type": "Reject", "feedback_reason": "Old stale reason from a different duplicate",
+            "feedback_synced": True, "reject_reason_change_count": 2,
+        },
+        "33087136", "Srinivasan Subramanian", "Senior Java Developer", "Pyramid Consulting",
+        datetime(2025, 1, 1),
+    )
+    cand_module, jobdiva_calls, fake_conn = _base_setup(
+        monkeypatch, select_row=None,
+        select_rows=[_fake_row_dup_stale_high_count, _fake_row_dup_current_low_count],
+    )
+
+    # The "current" row (lower id, most recently updated) only shows a count
+    # of 0 — but a stale duplicate already shows 2. Trusting only the current
+    # row's count would wrongly allow this change; the max across both must
+    # block it instead.
+    with pytest.raises(HTTPException) as exc_info:
+        await _reject(cand_module, "Overqualified for the role")
+
+    assert exc_info.value.status_code == 422
+    assert len(jobdiva_calls) == 0
+
+
+@pytest.mark.anyio
 async def test_fallback_path_also_enforces_the_limit(monkeypatch):
     """The candidate_id/jobdiva_id fallback (no sourced_row_id pin) must
     enforce the same limit, reading the count off the most-recently-updated
