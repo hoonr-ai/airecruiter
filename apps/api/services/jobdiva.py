@@ -2018,6 +2018,15 @@ class JobDivaService:
         # Retry schedule: first attempt 5 min, then two more at 10 min each.
         _ja_timeouts = [300.0, 600.0, 600.0]
         _ja_delays = [5, 15]
+        # A 429 — JobDiva throttling us, or the shared limiter's own "no slot
+        # came up" answer (jobdiva_rate_limit.is_slot_timeout) — means "try
+        # again later", never "no matches". It used to break out of the loop
+        # like any other 4xx and return [], so on a busy account the job
+        # launched with no JobAgent rows. These retries come back in seconds
+        # and don't use up the timeout schedule above.
+        _ja_rate_limit_delays = [5, 10, 20, 30]
+        _ja_rate_limit_max_wait_s = 30.0
+        _rate_limited_retries = 0
         response = None
         _last_response = None  # saved even on 5xx, for criteria-unconfigured check
 
@@ -2033,7 +2042,11 @@ class JobDivaService:
         _attempts_made = 0
         _resp_bytes = 0
         try:
-            for _attempt, _timeout_val in enumerate(_ja_timeouts):
+            _attempt = 0
+            while _attempt < len(_ja_timeouts):
+                _timeout_val = _ja_timeouts[_attempt]
+                _retry_after_s: Optional[float] = None
+                _rate_limited = False
                 try:
                     # Time client creation (fresh DNS+TCP+TLS handshake — no
                     # connection reuse) together with the GET, since that whole
@@ -2057,20 +2070,52 @@ class JobDivaService:
                         "JobAgentSearch jobId=%s attempt %d: HTTP %d in %.0fms (setup+http), %d bytes",
                         job_id, _attempts_made, response.status_code, _req_ms, _resp_bytes,
                     )
-                    if response.status_code < 500:
+                    if response.status_code == 429:
+                        _rate_limited = True
+                        _retry_after_s = _bi_rate_limit._parse_retry_after(
+                            response.headers.get("Retry-After")
+                        )
+                        logger.warning(
+                            "JobAgentSearch jobId=%s attempt %d: %s (Retry-After=%s)",
+                            job_id, _attempts_made,
+                            "no JobDiva slot came up" if _bi_rate_limit.is_slot_timeout(response)
+                            else "JobDiva rate-limited the request (HTTP 429)",
+                            response.headers.get("Retry-After"),
+                        )
+                        response = None
+                    elif response.status_code < 500:
                         break
-                    body = response.text or ""
-                    logger.warning(
-                        "JobAgentSearch attempt %d/%d: HTTP %d — %s",
-                        _attempt + 1, len(_ja_timeouts), response.status_code, body[:200],
-                    )
-                    response = None
+                    else:
+                        body = response.text or ""
+                        logger.warning(
+                            "JobAgentSearch attempt %d/%d: HTTP %d — %s",
+                            _attempt + 1, len(_ja_timeouts), response.status_code, body[:200],
+                        )
+                        response = None
                 except (httpx.TimeoutException, httpx.ConnectError) as _e:
                     logger.warning(
                         "JobAgentSearch attempt %d/%d failed: %s",
                         _attempt + 1, len(_ja_timeouts), _e,
                     )
                     response = None
+
+                if _rate_limited and _rate_limited_retries < len(_ja_rate_limit_delays):
+                    # A real 429 also started the shared cooldown, which the
+                    # next attempt's slot wait honours; this sleep only spaces
+                    # the attempts out.
+                    _delay = max(
+                        float(_ja_rate_limit_delays[_rate_limited_retries]),
+                        min(_retry_after_s or 0.0, _ja_rate_limit_max_wait_s),
+                    )
+                    _rate_limited_retries += 1
+                    logger.info(
+                        "JobAgentSearch jobId=%s rate-limited, retry %d/%d in %.0fs...",
+                        job_id, _rate_limited_retries, len(_ja_rate_limit_delays), _delay,
+                    )
+                    _sleep_t0 = time.perf_counter()
+                    await asyncio.sleep(_delay)
+                    _sleep_ms += (time.perf_counter() - _sleep_t0) * 1000.0
+                    continue
 
                 if _attempt < len(_ja_timeouts) - 1:
                     _delay = _ja_delays[_attempt]
@@ -2080,9 +2125,10 @@ class JobDivaService:
                     _sleep_ms += (time.perf_counter() - _sleep_t0) * 1000.0
                 else:
                     logger.error(
-                        "JobAgentSearch all %d attempts exhausted for jobId=%s",
-                        len(_ja_timeouts), job_id,
+                        "JobAgentSearch all %d attempts exhausted for jobId=%s (%d rate-limit retries)",
+                        len(_ja_timeouts), job_id, _rate_limited_retries,
                     )
+                _attempt += 1
         except Exception as e:
             logger.error(f"JobAgentSearch error: {e}")
             return [], criteria_unconfigured
@@ -2098,9 +2144,9 @@ class JobDivaService:
                         job_id,
                     )
             logger.info(
-                "JobAgent TIMING jobId=%s resumeCount=%s attempts=%d FAILED (no usable response) | "
-                "request_ms=%.0f sleep_ms=%.0f total_ms=%.0f",
-                job_id, resume_count, _attempts_made,
+                "JobAgent TIMING jobId=%s resumeCount=%s attempts=%d rate_limited_retries=%d "
+                "FAILED (no usable response) | request_ms=%.0f sleep_ms=%.0f total_ms=%.0f",
+                job_id, resume_count, _attempts_made, _rate_limited_retries,
                 _request_ms, _sleep_ms, (time.perf_counter() - _t_start) * 1000.0,
             )
             return [], criteria_unconfigured
