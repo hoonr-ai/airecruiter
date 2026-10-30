@@ -77,6 +77,7 @@ interface EvaluationReport {
     manager_email?: string;
     recruiter_notes?: string;
     submitted_by?: string;
+    reject_reason_change_count?: number;
   };
   scores: {
     resume_match_score: number;
@@ -465,24 +466,44 @@ export default function CandidateEvaluationReportPage() {
                 <div className="flex items-center gap-2 px-6 py-2 rounded-xl text-[14px] font-bold shadow-sm border bg-rose-50 border-rose-200 text-rose-700">
                   <Ban className="w-4 h-4" /> Rejected
                 </div>
-                {!sharedVia && (
-                  <button
-                    onClick={() => {
-                      // Reopen the same reject modal, prefilled with the
-                      // already-recorded reason, so a recruiter can change
-                      // it — this used to be impossible, since the whole
-                      // Submit/Reject button row disappeared behind this
-                      // static "Rejected" badge once a rejection was
-                      // recorded.
-                      setRejectReason(String(candidate.feedback_reason || ""));
-                      setIntegrationModalOpen('reject');
-                    }}
-                    className="flex items-center gap-2 px-4 py-2 bg-white border border-rose-200 rounded-lg text-sm font-medium text-rose-600 hover:bg-rose-50 transition-all shadow-sm"
-                  >
-                    <Ban className="w-4 h-4" />
-                    Change Rejection Reason
-                  </button>
-                )}
+                {!sharedVia && (() => {
+                  const changeCount = Number(candidate?.reject_reason_change_count ?? 0);
+                  const maxChanges = 2;
+                  const remaining = Math.max(0, maxChanges - changeCount);
+                  const limitReached = remaining === 0;
+
+                  return (
+                    <div className="flex items-center gap-2">
+                      <button
+                        disabled={limitReached}
+                        onClick={() => {
+                          setRejectReason(String(candidate.feedback_reason || ""));
+                          setIntegrationModalOpen('reject');
+                        }}
+                        className={`flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-medium transition-all shadow-sm ${
+                          limitReached
+                            ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
+                            : "bg-white border-rose-200 text-rose-600 hover:bg-rose-50"
+                        }`}
+                        title={
+                          limitReached
+                            ? "Rejection reason change limit reached (2/2)"
+                            : `Change reason (${remaining}/${maxChanges} attempts remaining)`
+                        }
+                      >
+                        <Ban className="w-4 h-4" />
+                        {limitReached ? "Reason Locked" : "Change Rejection Reason"}
+                      </button>
+                      <span
+                        className={`text-xs font-semibold tabular-nums ${
+                          limitReached ? "text-rose-500" : "text-slate-400"
+                        }`}
+                      >
+                        ({changeCount}/{maxChanges})
+                      </span>
+                    </div>
+                  );
+                })()}
               </div>
             ) : (
               <>
@@ -965,6 +986,26 @@ export default function CandidateEvaluationReportPage() {
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidate?.name || "Winci Zu"}</strong>.
                   </p>
+                  {(() => {
+                    const isChangingReason = isRejected;
+                    if (!isChangingReason) return null;
+                    const changeCount = Number(candidate?.reject_reason_change_count ?? 0);
+                    const MAX_CHANGES = 2;
+                    const remaining = Math.max(0, MAX_CHANGES - changeCount);
+                    return (
+                      <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${remaining === 0 ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
+                        <span className="font-semibold">
+                          {remaining === 0
+                            ? "Change limit reached"
+                            : `${remaining} change${remaining === 1 ? "" : "s"} remaining`}
+                        </span>
+                        <span className="text-[10px] opacity-75">({changeCount}/{MAX_CHANGES} used)</span>
+                        {remaining === 0 && (
+                          <span className="ml-1">Contact an admin for further changes.</span>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <div className="space-y-2">
                     <label htmlFor={`reject-reason-${candidate?.name || "report"}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
                     <RejectionReasonSelect

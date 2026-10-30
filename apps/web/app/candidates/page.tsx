@@ -263,6 +263,8 @@ interface Candidate {
   feedback_at?: string | null;
   feedback_by?: string | null;
   submission_type?: SubmissionKind | null;
+  /** How many times the rejection reason has been changed (max 2). */
+  reject_reason_change_count?: number;
   /** See submittalStatusFor. */
   submittal_status?: string;
   /** Earliest JobDiva submittal, calendar date YYYY-MM-DD (JobDiva's zone is unknown). */
@@ -1489,6 +1491,7 @@ export default function GlobalCandidatesPage() {
                                 <ChangeRejectionReasonButton
                                   candidateName={c.name}
                                   disabled={syncingCandidateId === c.id}
+                                  changeCount={c.reject_reason_change_count ?? 0}
                                   onClick={() => {
                                     setActionCandidateId(c.id);
                                     setRejectReason(c.feedback_reason || "");
@@ -1598,6 +1601,27 @@ export default function GlobalCandidatesPage() {
                   <p className="text-sm text-slate-500">
                     Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
                   </p>
+                  {(() => {
+                    const actionCand = candidates.find(c => c.id === actionCandidateId);
+                    const changeCount = actionCand?.reject_reason_change_count ?? 0;
+                    const isChangingReason = actionCand?.feedback === 'Reject';
+                    const MAX_CHANGES = 2;
+                    const remaining = Math.max(0, MAX_CHANGES - changeCount);
+                    if (!isChangingReason) return null;
+                    return (
+                      <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${remaining === 0 ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
+                        <span className="font-semibold">
+                          {remaining === 0
+                            ? "Change limit reached"
+                            : `${remaining} change${remaining === 1 ? "" : "s"} remaining`}
+                        </span>
+                        <span className="text-[10px] opacity-75">({changeCount}/{MAX_CHANGES} used)</span>
+                        {remaining === 0 && (
+                          <span className="ml-1">Contact an admin for further changes.</span>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <div className="space-y-2">
                     <label htmlFor={`reject-reason-${actionCandidateId}`} className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
                     <RejectionReasonSelect

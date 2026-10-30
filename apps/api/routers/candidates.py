@@ -4568,6 +4568,7 @@ def _launched_feedback_fields(data: Optional[dict]) -> Dict[str, Any]:
         # submitted_by is written on every decision type — it is the actor.
         "feedback_by": _text("submitted_by") if label else None,
         "submission_type": submission_kind(blob),
+        "reject_reason_change_count": _safe_reject_reason_change_count(blob) if label == "Reject" else 0,
     }
 
 
@@ -5597,6 +5598,7 @@ async def get_candidate_evaluation_report(
             "manager_email":   data_blob.get("manager_email"),
             "recruiter_notes": data_blob.get("recruiter_notes"),
             "submitted_by":    data_blob.get("submitted_by"),
+            "reject_reason_change_count": _safe_reject_reason_change_count(data_blob),
         }
         candidate_info.update(
             await _extract_candidate_gender_fields_with_ai(
