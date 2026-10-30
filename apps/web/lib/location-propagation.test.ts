@@ -39,10 +39,61 @@ test("merges the job location and note locations while preserving saved radii", 
     defaultRadius: "within 25 mi",
   });
 
+  // The saved primary entry had no zip, but one is now known — backfilled
+  // in, while the saved radius is still preserved untouched.
   assert.deepEqual(merged.map(({ value, radius }) => ({ value, radius })), [
-    { value: "Seattle, Washington", radius: "within 40 mi" },
+    { value: "Seattle, Washington 98101", radius: "within 40 mi" },
     { value: "New York, NY", radius: "within 25 mi" },
   ]);
+});
+
+test("backfills the job zip onto a saved zip-less primary entry", () => {
+  // Regression: a zip known via jobZip used to be dropped outright whenever
+  // ANY saved entry already existed for that city/state, even one saved
+  // before zip-appending existed — the fix must append it, not ignore it.
+  const merged = mergeSourceLocations({
+    jobCity: "Austin",
+    jobState: "TX",
+    jobZip: "78701",
+    existing: [{ id: 1, value: "Austin, TX", radius: "within 25 mi" }],
+    noteLocations: [],
+    defaultRadius: "within 25 mi",
+  });
+
+  assert.deepEqual(merged.map(({ value }) => value), ["Austin, TX 78701"]);
+});
+
+test("never overwrites a saved entry that already carries its own zip", () => {
+  // A recruiter's own deliberate zip (or one that differs from jobZip) must
+  // never be clobbered by backfill or upgrade logic.
+  const merged = mergeSourceLocations({
+    jobCity: "Austin",
+    jobState: "TX",
+    jobZip: "78701",
+    existing: [{ id: 1, value: "Austin, TX 78702", radius: "within 25 mi" }],
+    noteLocations: ["Austin, TX 78701"],
+    defaultRadius: "within 25 mi",
+  });
+
+  assert.deepEqual(merged.map(({ value }) => value), ["Austin, TX 78702"]);
+});
+
+test("upgrades an already-added zip-less entry when a later note location supplies the zip", () => {
+  // Regression: an AI-extracted JD location or recruiter note with a zip
+  // used to be silently discarded once a zip-less entry for the same
+  // city/state was already added first (e.g. the primary job-location
+  // entry) — normalizeLocationKey strips zips before matching, so both
+  // collide on the same key. The zip-bearing one must win instead of being
+  // dropped.
+  const merged = mergeSourceLocations({
+    jobCity: "Austin",
+    jobState: "TX",
+    existing: [],
+    noteLocations: ["Austin, TX 78701"],
+    defaultRadius: "within 25 mi",
+  });
+
+  assert.deepEqual(merged.map(({ value }) => value), ["Austin, TX 78701"]);
 });
 
 test("does not restore a manually removed location but still adds other note locations", () => {

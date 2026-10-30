@@ -25,6 +25,13 @@ const STATE_CODES: Record<string, string> = {
   wisconsin: "WI", wyoming: "WY", "district of columbia": "DC",
 };
 
+// Non-global so repeated .test() calls are safe (a `g`-flagged RegExp's
+// .test() advances its own lastIndex, so reusing one for Boolean-only checks
+// silently alternates true/false on consecutive calls against the same or
+// different strings — normalizeLocationKey's own zip-stripping regex below
+// needs the `g` flag for .replace() and is intentionally a separate literal).
+const LOCATION_HAS_ZIP_RE = /\b\d{5}(?:-\d{4})?\b/;
+
 export function normalizeLocationKey(value: string): string {
   const clean = String(value || "")
     .replace(/\b\d{5}(?:-\d{4})?\b/g, "")
@@ -57,7 +64,23 @@ export function mergeSourceLocations(args: {
   const add = (value: string, radius: string, preferredId?: number) => {
     const clean = String(value || "").trim();
     const key = normalizeLocationKey(clean);
-    if (!key || keys.has(key) || excluded.has(key)) return;
+    if (!key || excluded.has(key)) return;
+    if (keys.has(key)) {
+      // A later candidate for the SAME city/state that carries a zip code
+      // the already-added entry lacks must not be silently dropped —
+      // normalizeLocationKey strips zips before matching, so e.g. a
+      // zip-less saved entry and a fresh "Austin, TX 78701" from an
+      // AI-extracted JD location or a recruiter note collide on the same
+      // key here, and the zip-bearing one used to just get discarded
+      // outright (fix: zip codes configured earlier weren't carried into
+      // the Source step's location filter). Upgrade the existing entry's
+      // value in place instead; its id/radius are left untouched.
+      const idx = merged.findIndex(entry => normalizeLocationKey(entry.value) === key);
+      if (idx !== -1 && !LOCATION_HAS_ZIP_RE.test(merged[idx].value) && LOCATION_HAS_ZIP_RE.test(clean)) {
+        merged[idx] = { ...merged[idx], value: clean };
+      }
+      return;
+    }
     merged.push({ id: preferredId ?? nextId++, value: clean, radius });
     keys.add(key);
   };
@@ -68,11 +91,16 @@ export function mergeSourceLocations(args: {
   if (cityState && !args.remote) {
     const primaryKey = normalizeLocationKey(cityState);
     const savedPrimary = args.existing.find(location => normalizeLocationKey(location.value) === primaryKey);
-    add(
-      savedPrimary?.value || [cityState, String(args.jobZip || "").trim()].filter(Boolean).join(" "),
-      savedPrimary?.radius || args.defaultRadius,
-      savedPrimary?.id,
-    );
+    const jobZip = String(args.jobZip || "").trim();
+    // A saved primary entry from before zip-appending existed (or one that
+    // never had a zip to begin with) must not keep shadowing a zip that IS
+    // now known — append it rather than reusing the saved value verbatim.
+    // Never touches a saved value that already has SOME zip (possibly a
+    // recruiter's own deliberate edit): only backfills when one is missing.
+    const primaryValue = savedPrimary && !LOCATION_HAS_ZIP_RE.test(savedPrimary.value) && jobZip
+      ? `${savedPrimary.value} ${jobZip}`.trim()
+      : savedPrimary?.value || [cityState, jobZip].filter(Boolean).join(" ");
+    add(primaryValue, savedPrimary?.radius || args.defaultRadius, savedPrimary?.id);
   }
 
   for (const location of args.existing) add(location.value, location.radius, location.id);
