@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode, RecruiterQuestionType } from "@/lib/jobs/wizard-types";
 import {
+  extractZipOnlyValues,
   isGeneratedCommuteQuestion,
   mergeArrangementQuestionLocations,
   mergeSourceLocations,
@@ -4774,6 +4775,30 @@ function NewJobPageContent() {
         if (!req.value) return;
         pushRubricFilter("Requirement", req.value, req.value, req.required === "Required");
       });
+    }
+
+    // 6b. A bare zip code typed into "Other Requirements" only ever became
+    // the Step 4 resume-match "Requirement" filter above — nothing fed it
+    // into sourceLocations, so it never reached Step 5's Locations panel.
+    // Merged in (not overwritten) via the same mergeSourceLocations the
+    // AI-JD-locations flow uses, so it joins the job's own location and
+    // anything already configured on Step 5 rather than replacing them.
+    const zipRequirementLocations = extractZipOnlyValues(
+      (rubricData.other_requirements || []).map((req: any) => req?.value)
+    );
+    if (zipRequirementLocations.length > 0) {
+      setSourceLocations(
+        mergeSourceLocations({
+          jobCity: jobData?.city,
+          jobState: jobData?.state,
+          jobZip: jobData?.zip_code,
+          existing: sourceLocationsRef.current,
+          noteLocations: zipRequirementLocations,
+          defaultRadius: `within ${sourceLocationMilesRef.current} mi`,
+          excludedLocationKeys: Array.from(excludedSourceLocationKeysRef.current),
+          remote: isRemoteJob(jobData),
+        })
+      );
     }
 
     const nextFilters = [
